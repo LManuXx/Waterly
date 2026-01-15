@@ -3,23 +3,31 @@
 #include "freertos/task.h"
 #include "driver/i2c.h"
 #include "esp_log.h"
-#include "../components/as7265x/include/as7265x.h"
+#include "nvs_flash.h"
 
+#include "wifi_connect.h"
+#include "as7265x.h"
+
+// ---------------------------------------------------------
+// Configuraciones Hardware
+// ---------------------------------------------------------
 #define I2C_MASTER_SCL_IO           22
 #define I2C_MASTER_SDA_IO           21
 #define I2C_MASTER_NUM              I2C_NUM_0
-// Frecuencia conservadora para evitar errores en el puente virtual [cite: 541]
 #define I2C_MASTER_FREQ_HZ          100000 
 
-static const char *TAG = "MAIN";
-
-// Códigos de corriente para el LED (según Datasheet [cite: 724])
 #define LED_CURRENT_12MA  0
 #define LED_CURRENT_25MA  1
 #define LED_CURRENT_50MA  2
 #define LED_CURRENT_100MA 3
 
-void app_main(void)
+static const char *TAG = "MAIN";
+
+/**
+ * @brief Tarea principal de medición del sensor.
+ * Se ejecuta en paralelo una vez que hay WiFi.
+ */
+void sensor_task(void *pvParameters)
 {
     // ---------------------------------------------------------
     // 1. Configuración I2C
@@ -28,8 +36,6 @@ void app_main(void)
         .mode = I2C_MODE_MASTER,
         .sda_io_num = I2C_MASTER_SDA_IO,
         .scl_io_num = I2C_MASTER_SCL_IO,
-        // Habilitamos pull-ups internos. 
-        // IMPORTANTE: Si tienes resistencias físicas de 4.7k, cambia esto a DISABLE.
         .sda_pullup_en = GPIO_PULLUP_ENABLE,
         .scl_pullup_en = GPIO_PULLUP_ENABLE,
         .master.clk_speed = I2C_MASTER_FREQ_HZ,
@@ -42,99 +48,92 @@ void app_main(void)
     // 2. Inicializar Sensor
     // ---------------------------------------------------------
     as7265x_handle_t sensor;
-    ESP_LOGI(TAG, "Inicializando AS7265x...");
-    // Espera inicial para que el sensor arranque su firmware interno
-    vTaskDelay(pdMS_TO_TICKS(1000)); 
+    ESP_LOGI("SENSOR", "Iniciando hardware espectral...");
+    vTaskDelay(pdMS_TO_TICKS(1000)); // Espera de estabilización
 
     if (as7265x_init(&sensor, I2C_MASTER_NUM) != ESP_OK) {
-        ESP_LOGE(TAG, "FALLO CRITICO: Sensor no responde. Revisa cableado.");
-        return;
+        ESP_LOGE("SENSOR", "Fallo al iniciar AS7265x. Tarea detenida.");
+        vTaskDelete(NULL); // Matamos la tarea si no hay sensor
     }
-    ESP_LOGI(TAG, "Sensor AS7265x detectado y listo.");
-
-    // ---------------------------------------------------------
-    // 3. Configuración Inicial del Sensor
-    // ---------------------------------------------------------
     
-    // Configuración de Tiempo de Integración [cite: 711]
-    // Valor 50 * 2.8ms = 140ms por ciclo de integración.
-    uint8_t int_cycles = 50; 
-    as7265x_set_integration_time(&sensor, int_cycles);
-
-    // Ganancia [cite: 703]
-    // Usamos 16X para evitar saturación (valores máximos) en las primeras pruebas.
-    // Si sale muy oscuro, sube a 64X.
+    // Configuración base
+    as7265x_set_integration_time(&sensor, 50); // ~140ms
     as7265x_gain_t ganancia = AS7265X_GAIN_64X;
-
-    // Aseguramos que el LED empiece apagado [cite: 724]
     as7265x_set_bulb_current(&sensor, LED_CURRENT_12MA, false);
 
     as7265x_values_t data;
 
-    // Bucle Principal
+    // ---------------------------------------------------------
+    // 3. Bucle de Medición
+    // ---------------------------------------------------------
     while (1) {
-        ESP_LOGI(TAG, "--- Iniciando Captura Sincronizada (One-Shot) ---");
+        ESP_LOGI("SENSOR", "--- Iniciando Captura (One-Shot) ---");
 
-        // PASO A: Encender la iluminación
-        // Esto actúa como el obturador electrónico [cite: 513]
+        // A) Encender Luz
         as7265x_set_bulb_current(&sensor, LED_CURRENT_12MA, true);
-        
-        // Espera breve para que el filamento/LED se estabilice
         vTaskDelay(pdMS_TO_TICKS(100)); 
 
-        // PASO B: Disparar la medición (TRIGGER)
-        // Configuramos en Modo 3 (One-Shot). Esto reinicia el ciclo y captura los 18 canales.
-        // Al escribir en este registro, el sensor comienza a integrar inmediatamente. [cite: 703]
+        // B) Disparar medición
         as7265x_set_config(&sensor, AS7265X_MEASUREMENT_MODE_6_CHAN_ONE_SHOT, ganancia);
 
-        // PASO C: Esperar a que el sensor termine (POLLING)
-        // El tiempo teórico mínimo es: 140ms * 2 bancos = 280ms [cite: 447, 523]
-        // Hacemos un bucle preguntando "¿Estás listo?" para mantener la sincronización perfecta.
-        bool data_ready = false;
-        int timeout_counter = 0;
-        int max_retries = 20; // 20 * 50ms = 1 segundo de timeout máximo
-
-        while (timeout_counter < max_retries) {
-            vTaskDelay(pdMS_TO_TICKS(50)); // Preguntar cada 50ms
-            
+        // C) Esperar datos (Polling)
+        bool ready = false;
+        int retries = 0;
+        while (retries < 20) {
+            vTaskDelay(pdMS_TO_TICKS(50));
             if (as7265x_data_ready(&sensor)) {
-                data_ready = true;
-                break; // ¡Datos listos! Salir del bucle de espera
+                ready = true;
+                break;
             }
-            timeout_counter++;
+            retries++;
         }
 
-        // PASO D: Apagar la iluminación INMEDIATAMENTE
-        // Ya tenemos los datos en el buffer del sensor, apagamos para no calentar la muestra.
+        // D) Apagar Luz
         as7265x_set_bulb_current(&sensor, LED_CURRENT_12MA, false);
 
-        // PASO E: Leer y procesar
-        if (data_ready) {
-            ESP_LOGI(TAG, "Integración completa. Leyendo registros...");
-
-            // Leemos los registros virtuales [cite: 681]
+        // E) Leer y Procesar
+        if (ready) {
             if (as7265x_get_all_values(&sensor, &data) == ESP_OK) {
-                // Imprimimos los canales clave para tu proyecto (Nitrato/Potasio/Sodio)
-                // UV (A), Visible (G, R), NIR (L)
-                ESP_LOGI(TAG, "Resultados:");
-                ESP_LOGI(TAG, "  Violeta (A - 410nm): %.2f", data.A);
-                ESP_LOGI(TAG, "  Verde   (G - 560nm): %.2f", data.G);
-                ESP_LOGI(TAG, "  Rojo    (R - 610nm): %.2f", data.R);
-                ESP_LOGI(TAG, "  NIR 1   (V - 810nm): %.2f", data.V);
-                ESP_LOGI(TAG, "  NIR 2   (L - 940nm): %.2f", data.L);
+                ESP_LOGI("SENSOR", "Lectura Exitosa:");
+                ESP_LOGI("SENSOR", "  UV (A-410nm):  %.2f", data.A);
+                ESP_LOGI("SENSOR", "  Vis (G-560nm): %.2f", data.G);
+                ESP_LOGI("SENSOR", "  NIR (W-860nm): %.2f", data.W);
                 
-                // Verificación de cordura:
-                if (data.R == 0.0f && data.G == 0.0f && data.A == 0.0f) {
-                    ESP_LOGW(TAG, "ALERTA: Lectura de ceros. Verifica si el LED encendió.");
-                }
+                // TODO: Aquí pondrás tu llamada a la API REST o MQTT
+                // send_data_to_cloud(data); 
+                
             } else {
-                ESP_LOGE(TAG, "Error en la transferencia I2C durante la lectura.");
+                ESP_LOGE("SENSOR", "Error leyendo datos I2C");
             }
         } else {
-            ESP_LOGW(TAG, "TIMEOUT: El sensor no respondió a tiempo (DATA_RDY nunca fue 1).");
+            ESP_LOGW("SENSOR", "Timeout esperando datos");
         }
 
-        ESP_LOGI(TAG, "--- Fin de ciclo, esperando 3s ---");
-        vTaskDelay(pdMS_TO_TICKS(3000));
+        // Esperar 5 segundos antes de la siguiente muestra
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+
+void app_main(void)
+{
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    ESP_LOGI(TAG, "Arrancando sistema...");
+
+    if (wifi_connect_init() == ESP_OK) {
+        
+        ESP_LOGI(TAG, "WiFi Conectado. Lanzando tarea de sensores...");
+        
+        xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, NULL);
+
+    } else {
+        ESP_LOGE(TAG, "No se pudo conectar al WiFi. Reiniciando...");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        esp_restart();
     }
 }
