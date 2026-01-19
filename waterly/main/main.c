@@ -130,9 +130,6 @@ void app_main(void)
       ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-    
-    // Añadimos la tarea actual (main/wifi) a la vigilancia
-    esp_task_wdt_add(NULL);
 
     ESP_LOGI(TAG, "Arrancando sistema...");
 
