@@ -21,7 +21,7 @@ static void ssd1306_send_cmd(uint8_t cmd) {
     i2c_master_write_byte(link, 0x00, true);
     i2c_master_write_byte(link, cmd, true);
     i2c_master_stop(link);
-    i2c_master_cmd_begin(s_i2c_port, link, pdMS_TO_TICKS(1000));
+    i2c_master_cmd_begin(s_i2c_port, link, pdMS_TO_TICKS(50));
     i2c_cmd_link_delete(link);
 }
 
@@ -32,7 +32,7 @@ static void ssd1306_send_data(uint8_t *data, int len) {
     i2c_master_write_byte(link, 0x40, true);
     i2c_master_write(link, data, len, true);
     i2c_master_stop(link);
-    i2c_master_cmd_begin(s_i2c_port, link, pdMS_TO_TICKS(1000));
+    i2c_master_cmd_begin(s_i2c_port, link, pdMS_TO_TICKS(50));
     i2c_cmd_link_delete(link);
 }
 
