@@ -7,6 +7,10 @@
 #include "ota_update.h"
 #include "esp_task_wdt.h"
 
+#include <time.h>
+#include <sys/time.h>
+#include "esp_sntp.h"
+
 #define VERSION_JSON_URL "https://raw.githubusercontent.com/LManuXx/Waterly/main/waterly/version.json"
 
 #define CURRENT_FIRMWARE_VERSION 1
@@ -28,6 +32,45 @@
 #define LED_CURRENT_100MA 3
 
 static const char *TAG = "MAIN";
+
+
+void setup_time(void)
+{
+    ESP_LOGI(TAG, "Inicializando SNTP (Obteniendo hora)...");
+
+    // 1. Configuración básica de SNTP
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org"); // Servidor NTP global
+    esp_sntp_init();
+
+    // 2. Configurar Zona Horaria para España (Madrid/Península)
+    // CET-1CEST = Invierno UTC+1, Verano UTC+2
+    // M3.5.0 = Cambio a verano: Marzo (3), última semana (5), Domingo (0)
+    // M10.5.0 = Cambio a invierno: Octubre (10), última semana (5), Domingo (0)
+    setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
+    tzset();
+
+    // 3. Esperar a que se sincronice la hora
+    int retry = 0;
+    const int retry_count = 15;
+    while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count) {
+        ESP_LOGI(TAG, "Esperando hora del sistema (%d/%d)...", retry, retry_count);
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+    }
+
+    if (retry == retry_count) {
+        ESP_LOGW(TAG, "No se pudo obtener la hora (Timeout). Usando hora por defecto.");
+    } else {
+        // Imprimir la hora actual para confirmar
+        time_t now;
+        struct tm timeinfo;
+        time(&now);
+        localtime_r(&now, &timeinfo);
+        char strftime_buf[64];
+        strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
+        ESP_LOGI(TAG, "¡Hora sincronizada! Fecha actual: %s", strftime_buf);
+    }
+}
 
 /**
  * @brief Tarea principal de medición del sensor.
@@ -100,7 +143,14 @@ void sensor_task(void *pvParameters)
         // E) Leer y Procesar
         if (ready) {
             if (as7265x_get_all_values(&sensor, &data) == ESP_OK) {
-                ESP_LOGI("SENSOR", "Lectura Exitosa:");
+                time_t now;
+                struct tm timeinfo;
+                time(&now);
+                localtime_r(&now, &timeinfo);
+                char time_buf[64];
+                strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+
+                ESP_LOGI("SENSOR", "[%s] Lectura Exitosa:", time_buf);
                 ESP_LOGI("SENSOR", "  UV (A-410nm):  %.2f", data.A);
                 ESP_LOGI("SENSOR", "  Vis (G-560nm): %.2f", data.G);
                 ESP_LOGI("SENSOR", "  NIR (W-860nm): %.2f", data.W);
@@ -134,8 +184,10 @@ void app_main(void)
     ESP_LOGI(TAG, "Arrancando sistema...");
 
     if (wifi_connect_init() == ESP_OK) {
+
         
-        ESP_LOGI(TAG, "WiFi Conectado. Lanzando tarea de sensores...");
+        ESP_LOGI(TAG, "WiFi Conectado. Sincronizando reloj...");
+        setup_time();
         
         //check_and_update_firmware(VERSION_JSON_URL, CURRENT_FIRMWARE_VERSION);
         
