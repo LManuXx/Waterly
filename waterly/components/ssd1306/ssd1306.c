@@ -21,7 +21,7 @@ static void ssd1306_send_cmd(uint8_t cmd) {
     i2c_master_write_byte(link, 0x00, true);
     i2c_master_write_byte(link, cmd, true);
     i2c_master_stop(link);
-    i2c_master_cmd_begin(s_i2c_port, link, pdMS_TO_TICKS(10));
+    i2c_master_cmd_begin(s_i2c_port, link, pdMS_TO_TICKS(1000));
     i2c_cmd_link_delete(link);
 }
 
@@ -32,7 +32,7 @@ static void ssd1306_send_data(uint8_t *data, int len) {
     i2c_master_write_byte(link, 0x40, true);
     i2c_master_write(link, data, len, true);
     i2c_master_stop(link);
-    i2c_master_cmd_begin(s_i2c_port, link, pdMS_TO_TICKS(10));
+    i2c_master_cmd_begin(s_i2c_port, link, pdMS_TO_TICKS(1000));
     i2c_cmd_link_delete(link);
 }
 
@@ -67,13 +67,13 @@ void ssd1306_init(i2c_port_t i2c_num) {
 }
 
 void ssd1306_clear(void) {
-    uint8_t zero[128];
-    memset(zero, 0x00, 128);
+    uint8_t zero[132];
+    memset(zero, 0x00, 132);
     for (uint8_t page = 0; page < 8; page++) {
         ssd1306_send_cmd(0xB0 + page);
         ssd1306_send_cmd(0x00);      
         ssd1306_send_cmd(0x10); 
-        ssd1306_send_data(zero, 128);
+        ssd1306_send_data(zero, 132);
     }
 }
 

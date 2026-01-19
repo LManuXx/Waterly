@@ -187,9 +187,10 @@ void app_main(void)
     ssd1306_init(I2C_MASTER_NUM);
     ssd1306_clear();
     ssd1306_print(0, 0, "----------------");
-    ssd1306_print(2, 20, "HoLA MANU"); 
-    ssd1306_print(4, 30, "FuNCIONA");
+    ssd1306_print(2, 20, "Te AMO"); 
+    ssd1306_print(4, 20, "CULONA");
     ssd1306_print(7, 0, "----------------");
+    
     
 
     /*if (wifi_connect_init() == ESP_OK) {
