@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "ota_update.h"
+#include "esp_task_wdt.h"
 
 #define VERSION_JSON_URL "https://raw.githubusercontent.com/LManuXx/Waterly/main/waterly/version.json"
 
@@ -67,13 +68,13 @@ void sensor_task(void *pvParameters)
     as7265x_set_bulb_current(&sensor, LED_CURRENT_12MA, false);
 
     as7265x_values_t data;
-
+    esp_task_wdt_add(NULL); // Añadir tarea a lista de vigilzancia del wd
     // ---------------------------------------------------------
     // 3. Bucle de Medición
     // ---------------------------------------------------------
     while (1) {
+        esp_task_wdt_reset(); // Alimentar el wd
         ESP_LOGI("SENSOR", "--- Iniciando Captura (One-Shot) ---");
-
         // A) Encender Luz
         as7265x_set_bulb_current(&sensor, LED_CURRENT_12MA, true);
         vTaskDelay(pdMS_TO_TICKS(100)); 
@@ -116,7 +117,9 @@ void sensor_task(void *pvParameters)
 
         // Esperar 5 segundos antes de la siguiente muestra
         vTaskDelay(pdMS_TO_TICKS(5000));
+        esp_task_wdt_reset();
     }
+    esp_task_wdt_delete(NULL); // Si la tarea muere le quitamos el wd para evitar reset
 }
 
 void app_main(void)
@@ -127,6 +130,9 @@ void app_main(void)
       ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    
+    // Añadimos la tarea actual (main/wifi) a la vigilancia
+    esp_task_wdt_add(NULL);
 
     ESP_LOGI(TAG, "Arrancando sistema...");
 
@@ -134,7 +140,7 @@ void app_main(void)
         
         ESP_LOGI(TAG, "WiFi Conectado. Lanzando tarea de sensores...");
         
-        check_and_update_firmware(VERSION_JSON_URL, CURRENT_FIRMWARE_VERSION);
+        //check_and_update_firmware(VERSION_JSON_URL, CURRENT_FIRMWARE_VERSION);
         
         ESP_LOGI(TAG, "Actualizando a la version 2 olé");
 
