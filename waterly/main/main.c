@@ -4,6 +4,11 @@
 #include "driver/i2c.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "ota_update.h"
+
+#define VERSION_JSON_URL "https://github.com/LManuXx/Waterly/tree/main/waterly/version.json"
+
+#define CURRENT_FIRMWARE_VERSION 1
 
 #include "wifi_connect.h"
 #include "as7265x.h"
@@ -128,6 +133,8 @@ void app_main(void)
     if (wifi_connect_init() == ESP_OK) {
         
         ESP_LOGI(TAG, "WiFi Conectado. Lanzando tarea de sensores...");
+        
+        check_and_update_firmware(VERSION_JSON_URL, CURRENT_FIRMWARE_VERSION);
         
         xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, NULL);
 
