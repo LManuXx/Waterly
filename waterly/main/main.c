@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_task_wdt.h"
+#include "esp_sleep.h" // Necesario para Deep Sleep
 
 #include <time.h>
 #include <sys/time.h>
@@ -19,20 +20,31 @@
 #include "ssd1306.h"
 
 // ---------------------------------------------------------
+// MODULARIDAD: Componente MQTT
+// ---------------------------------------------------------
+#include "mqtt_app.h" 
+
+// ---------------------------------------------------------
 // Configuraciones Hardware
 // ---------------------------------------------------------
 #define I2C_MASTER_SCL_IO           22
 #define I2C_MASTER_SDA_IO           21
 #define I2C_MASTER_NUM              I2C_NUM_0
 #define I2C_MASTER_FREQ_HZ          100000 
+#define LED_CURRENT_12MA            0
 
-#define LED_CURRENT_12MA  0
+// Configuración de tiempos
+#define TIEMPO_ESPERA_MQTT_SEG      5
+#define TIEMPO_DEEP_SLEEP_MIN       1  // Tiempo que dormirá en modo ahorro
+#define TIEMPO_ENTRE_MUESTRAS_MS    500 // Velocidad en modo entrenamiento (rápido)
 
 static const char *TAG = "MAIN";
 
+// --- Funciones Auxiliares ---
+
 void setup_time(void)
 {
-    ESP_LOGI(TAG, "Inicializando SNTP (Obteniendo hora)...");
+    ESP_LOGI(TAG, "Inicializando SNTP...");
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_init();
@@ -40,127 +52,141 @@ void setup_time(void)
     tzset();
 
     int retry = 0;
-    const int retry_count = 10; // Bajamos reintentos para no bloquear tanto
+    const int retry_count = 5;
     while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count) {
         ESP_LOGI(TAG, "Esperando hora... (%d/%d)", retry, retry_count);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    }
-
-    if (retry == retry_count) {
-        ESP_LOGW(TAG, "No se pudo obtener hora. Usando default.");
-    } else {
-        time_t now;
-        struct tm timeinfo;
-        time(&now);
-        localtime_r(&now, &timeinfo);
-        char strftime_buf[64];
-        strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
-        ESP_LOGI(TAG, "Hora sincronizada: %s", strftime_buf);
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
-void sensor_task(void *pvParameters)
-{
-    as7265x_handle_t sensor;
+// Inicializa el sensor AS7265x
+bool iniciar_sensor(as7265x_handle_t *sensor) {
     ESP_LOGI("SENSOR", "Iniciando hardware espectral...");
-    vTaskDelay(pdMS_TO_TICKS(1000)); 
-
-    // Aquí ya NO instalamos driver, solo iniciamos el objeto sensor
-    if (as7265x_init(&sensor, I2C_MASTER_NUM) != ESP_OK) {
-        ESP_LOGE("SENSOR", "Fallo al iniciar AS7265x. ¿Cableado o Driver duplicado?");
-        
-        // Mensaje de error en pantalla para que lo veas
+    if (as7265x_init(sensor, I2C_MASTER_NUM) != ESP_OK) {
+        ESP_LOGE("SENSOR", "Fallo al iniciar AS7265x.");
         ssd1306_clear();
         ssd1306_print(0, 0, "ERROR SENSOR");
-        ssd1306_print(2, 0, "Revisar Cables");
-        
-        vTaskDelete(NULL); 
+        return false;
     }
     
-    as7265x_set_integration_time(&sensor, 50); 
-    as7265x_gain_t ganancia = AS7265X_GAIN_64X;
-    as7265x_set_bulb_current(&sensor, LED_CURRENT_12MA, false);
-
-    as7265x_values_t data;
-    esp_task_wdt_add(NULL); 
-
-    while (1) {
-        esp_task_wdt_reset(); 
-        ESP_LOGI("SENSOR", "--- Iniciando Captura ---");
-        
-        // Actualizamos pantalla para saber que está vivo
-        ssd1306_print(0, 0, "Midiendo...");
-
-        // A) Encender Luz
-        as7265x_set_bulb_current(&sensor, LED_CURRENT_12MA, true);
-        vTaskDelay(pdMS_TO_TICKS(100)); 
-
-        // B) Disparar
-        as7265x_set_config(&sensor, AS7265X_MEASUREMENT_MODE_6_CHAN_ONE_SHOT, ganancia);
-
-        // C) Polling
-        bool ready = false;
-        int retries = 0;
-        while (retries < 20) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            if (as7265x_data_ready(&sensor)) {
-                ready = true;
-                break;
-            }
-            retries++;
-        }
-
-        // D) Apagar Luz
-        as7265x_set_bulb_current(&sensor, LED_CURRENT_12MA, false);
-
-        // E) Leer
-        if (ready) {
-            if (as7265x_get_all_values(&sensor, &data) == ESP_OK) {
-                time_t now;
-                struct tm timeinfo;
-                time(&now);
-                localtime_r(&now, &timeinfo);
-                char time_buf[64];
-                strftime(time_buf, sizeof(time_buf), "%H:%M:%S", &timeinfo); // Solo hora para pantalla
-
-                ESP_LOGI("SENSOR", "Lectura OK");
-                
-                // PANTALLA
-                char buf[64]; // <--- IMPORTANTE: Tamaño 64
-                ssd1306_clear();
-                ssd1306_print(0, 0, "Waterly OK");
-                
-                // CAMBIO AQUÍ: Usamos sizeof(buf) en lugar de 16
-                snprintf(buf, sizeof(buf), "UV: %.1f", data.A);
-                ssd1306_print(2, 0, buf);
-
-                snprintf(buf, sizeof(buf), "VIS:%.1f", data.G);
-                ssd1306_print(3, 0, buf);
-                
-                snprintf(buf, sizeof(buf), "NIR:%.1f", data.W);
-                ssd1306_print(4, 0, buf);
-                
-                // AQUÍ ES DONDE FALLABA: Ahora con sizeof(buf) ya caben los 64 bytes
-                snprintf(buf, sizeof(buf), "%s", time_buf);
-                ssd1306_print(7, 0, buf);
-
-            } else {
-                ESP_LOGE("SENSOR", "Error I2C");
-                ssd1306_print(0, 0, "Error I2C Lectura");
-            }
-        } else {
-            ESP_LOGW("SENSOR", "Timeout");
-            ssd1306_print(0, 0, "Timeout Sensor");
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        esp_task_wdt_reset();
-    }
-    esp_task_wdt_delete(NULL);
+    as7265x_set_integration_time(sensor, 50); 
+    as7265x_set_bulb_current(sensor, LED_CURRENT_12MA, false);
+    return true;
 }
+
+// Función CORE: Realiza UN ciclo de medición y envío
+// Retorna true si todo fue bien
+bool tomar_medida_y_enviar(as7265x_handle_t *sensor) {
+    as7265x_values_t data;
+    as7265x_gain_t ganancia = AS7265X_GAIN_64X;
+
+    ESP_LOGI("SENSOR", "--- Iniciando Captura ---");
+    ssd1306_print(0, 0, "Midiendo...");
+
+    // A) Encender Luz
+    as7265x_set_bulb_current(sensor, LED_CURRENT_12MA, true);
+    vTaskDelay(pdMS_TO_TICKS(100)); 
+
+    // B) Disparar
+    as7265x_set_config(sensor, AS7265X_MEASUREMENT_MODE_6_CHAN_ONE_SHOT, ganancia);
+
+    // C) Polling (Esperar dato)
+    bool ready = false;
+    int retries = 0;
+    while (retries < 20) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (as7265x_data_ready(sensor)) {
+            ready = true;
+            break;
+        }
+        retries++;
+    }
+
+    // D) Apagar Luz
+    as7265x_set_bulb_current(sensor, LED_CURRENT_12MA, false);
+
+    // E) Procesar
+    if (ready) {
+        if (as7265x_get_all_values(sensor, &data) == ESP_OK) {
+            // Hora
+            time_t now;
+            struct tm timeinfo;
+            time(&now);
+            localtime_r(&now, &timeinfo);
+            char time_buf[64];
+            strftime(time_buf, sizeof(time_buf), "%H:%M:%S", &timeinfo);
+
+            ESP_LOGI("SENSOR", "Lectura OK -> Enviando...");
+
+            // 1. PANTALLA
+            char buf[64];
+            ssd1306_clear();
+            ssd1306_print(0, 0, "Waterly OK");
+            
+            snprintf(buf, sizeof(buf), "UV: %.1f", data.A);
+            ssd1306_print(2, 0, buf);
+            snprintf(buf, sizeof(buf), "VIS:%.1f", data.G);
+            ssd1306_print(3, 0, buf);
+            snprintf(buf, sizeof(buf), "NIR:%.1f", data.W);
+            ssd1306_print(4, 0, buf);
+            snprintf(buf, sizeof(buf), "%s", time_buf);
+            ssd1306_print(7, 0, buf);
+
+            // 2. MQTT (Enviar a Docker)
+            // Convertimos a int para simplificar, puedes cambiarlo si quieres float
+            mqtt_app_send_data((int)data.A, (int)data.G, (int)data.W);
+            
+            return true;
+        }
+    }
+    
+    ESP_LOGE("SENSOR", "Fallo en lectura");
+    ssd1306_print(0, 0, "Error Lectura");
+    return false;
+}
+
+// Tarea para Modo Entrenamiento (Bucle Infinito)
+// Tarea para Modo Entrenamiento
+void task_modo_entrenamiento(void *pvParameters) {
+    as7265x_handle_t sensor;
+    
+    if (!iniciar_sensor(&sensor)) {
+        vTaskDelete(NULL);
+    }
+
+    esp_task_wdt_add(NULL);
+
+    while(1) {
+        esp_task_wdt_reset();
+
+        // Revisamos si ha llegado una orden de parar (Deep Sleep) por MQTT
+        if (modo_entrenamiento_activo == false) {
+            ESP_LOGW(TAG, "Detectada orden de PARADA. Entrando en Deep Sleep...");
+            ssd1306_print(4, 0, "Orden: SLEEP");
+            
+            // Damos un momento para asegurar que el log salga
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            
+            // Apagamos luz del sensor por seguridad antes de dormir
+            as7265x_set_bulb_current(&sensor, LED_CURRENT_12MA, false);
+            
+            // Nos vamos a dormir el tiempo estipulado
+            esp_deep_sleep(TIEMPO_DEEP_SLEEP_MIN * 60 * 1000000ULL);
+        }
+        // --------------------------------------
+
+        tomar_medida_y_enviar(&sensor);
+        
+        // En modo entrenamiento vamos rápido
+        vTaskDelay(pdMS_TO_TICKS(TIEMPO_ENTRE_MUESTRAS_MS));
+    }
+}
+
+// --- MAIN PRINCIPAL ---
 
 void app_main(void)
 {
+    // 1. Inicialización Sistema y NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
       ESP_ERROR_CHECK(nvs_flash_erase());
@@ -170,7 +196,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Arrancando sistema...");
 
-    // 1. Instalar I2C Globalmente
+    // 2. Instalar I2C
     i2c_config_t conf = {
         .mode = I2C_MODE_MASTER,
         .sda_io_num = I2C_MASTER_SDA_IO,
@@ -183,26 +209,64 @@ void app_main(void)
     i2c_param_config(I2C_MASTER_NUM, &conf);
     ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0));
 
-    // 2. INICIAR PANTALLA (¡DESCOMENTADO E IMPRESCINDIBLE!)
+    // 3. Iniciar Pantalla
     ssd1306_init(I2C_MASTER_NUM);
     ssd1306_clear();
+    ssd1306_print(0, 0, "Waterly Boot...");
 
+    // 4. Conectar WiFi
     if (wifi_connect_init() == ESP_OK) {
         
-        ssd1306_print(2, 0, "WiFi OK!");
-        ssd1306_print(3, 0, "Sync Hora...");
+        ssd1306_print(2, 0, "WiFi OK");
+        setup_time(); // Hora
+
+        // 5. Iniciar MQTT
+        ESP_LOGI(TAG, "Iniciando MQTT...");
+        mqtt_app_start();
         
-        ESP_LOGI(TAG, "WiFi Conectado. Sincronizando reloj...");
-        setup_time();
+        ssd1306_print(4, 0, "Check Config...");
+        ESP_LOGI(TAG, "Esperando %d s para recibir comandos MQTT...", TIEMPO_ESPERA_MQTT_SEG);
         
-        ssd1306_print(3, 0, "Hora OK!");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        
-        ESP_LOGI(TAG, "Lanzando sensores...");
-        xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, NULL);
+        // Esperamos X segundos para dar tiempo a recibir mensajes retenidos
+        vTaskDelay(pdMS_TO_TICKS(TIEMPO_ESPERA_MQTT_SEG * 1000));
+
+        // Leemos la variable global definida en mqtt_app
+        if (modo_entrenamiento_activo) {
+            // >>> MODO ENTRENAMIENTO (NO DUERME) <<<
+            ESP_LOGW(TAG, "MODO: ENTRENAMIENTO ACTIVO");
+            ssd1306_print(4, 0, "Modo: TRAINING");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            
+            // Creamos la tarea que nunca termina
+            xTaskCreate(task_modo_entrenamiento, "training_task", 4096, NULL, 5, NULL);
+
+        } else {
+            // >>> MODO AHORRO (DEEP SLEEP) <<<
+            ESP_LOGI(TAG, "MODO: AHORRO DE ENERGIA");
+            ssd1306_print(4, 0, "Modo: SLEEP");
+            
+            // Inicializamos sensor localmente (porque no usamos tarea)
+            as7265x_handle_t sensor_local;
+            if (iniciar_sensor(&sensor_local)) {
+                // Medimos UNA vez
+                tomar_medida_y_enviar(&sensor_local);
+            }
+            
+            ESP_LOGI(TAG, "Durmiendo %d minutos...", TIEMPO_DEEP_SLEEP_MIN);
+            ssd1306_print(6, 0, "Durmiendo...");
+            
+            // Damos tiempo a que el mensaje MQTT salga de la cola de envío
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            
+            // Apagamos pantalla para ahorrar
+            ssd1306_clear();
+            
+            // Bye bye
+            esp_deep_sleep(TIEMPO_DEEP_SLEEP_MIN * 60 * 1000000ULL);
+        }
 
     } else {
-        ESP_LOGE(TAG, "Fallo WiFi");
+        ESP_LOGE(TAG, "Fallo WiFi crítico");
         ssd1306_print(2, 0, "Error WiFi");
         vTaskDelay(pdMS_TO_TICKS(5000));
         esp_restart();
