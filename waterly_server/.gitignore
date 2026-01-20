@@ -1,0 +1,26 @@
+# --- GENERAL ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- SERVIDOR (Waterly Server) ---
+# Ignoramos la caché de Python
+backend/__pycache__/
+backend/*.pyc
+
+# --- DOCKER & DATOS (Lo más importante) ---
+# NO subas los logs de Mosquitto
+mosquitto/log/*.log
+
+# NO subas la base de datos interna de Mosquitto (persistencia)
+mosquitto/data/*.db
+
+# Si en el futuro usas volúmenes locales para Influx/Grafana, ignóralos
+influxdb_data/
+grafana_data/
+
+# --- SEGURIDAD ---
+# Archivos de variables de entorno con contraseñas
+.env
+backend/.env

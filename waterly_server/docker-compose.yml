@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  # 1. EL CARTERO (MQTT)
+  mosquitto:
+    image: eclipse-mosquitto
+    container_name: waterly_mqtt
+    restart: always
+    ports:
+      - "1883:1883"      # Puerto para el ESP32
+      - "9001:9001"      # Puerto WebSockets
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+
+  # 2. LA MEMORIA (Base de Datos)
+  influxdb:
+    image: influxdb:2.7
+    container_name: waterly_db
+    restart: always
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=adminpassword123  # Cambia esto si quieres
+      - DOCKER_INFLUXDB_INIT_ORG=waterly_org
+      - DOCKER_INFLUXDB_INIT_BUCKET=sensor_data
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+
+  # 3. LA PANTALLA (Grafana)
+  grafana:
+    image: grafana/grafana
+    container_name: waterly_dash
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - influxdb
+
+  waterly_brain:
+    build: ./backend          
+    container_name: waterly_api
+    restart: always
+    ports:
+      - "8000:8000"           
+    depends_on:
+      - mosquitto             
+    environment:
+      - MQTT_BROKER=mosquitto
+
+# Volúmenes gestionados por Docker para no perder datos al reiniciar
+volumes:
+  influxdb_data:
+  grafana_data:
