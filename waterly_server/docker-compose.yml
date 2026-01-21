@@ -2,21 +2,19 @@ version: '3.8'
 
 services:
   # 1. EL CARTERO (Mosquitto)
-  # Tu ESP32 seguirá conectándose aquí (Puerto 1883)
   mosquitto:
     image: eclipse-mosquitto
     container_name: waterly_mqtt
     restart: always
     ports:
-      - "1883:1883"      # Puerto estándar MQTT
-      - "9001:9001"      # WebSockets
+      - "1883:1883"
+      - "9001:9001"
     volumes:
       - ./mosquitto/config:/mosquitto/config
       - ./mosquitto/data:/mosquitto/data
       - ./mosquitto/log:/mosquitto/log
 
   # 2. LA MEMORIA (InfluxDB)
-  # Aquí guardaremos el histórico masivo para la IA
   influxdb:
     image: influxdb:2.7
     container_name: waterly_db
@@ -33,34 +31,47 @@ services:
       - influxdb_data:/var/lib/influxdb2
 
   # 3. EL CEREBRO (Python API)
-  # Este conectará todo: Mosquitto <-> InfluxDB <-> ThingsBoard
   waterly_brain:
     build: ./backend          
     container_name: waterly_api
     restart: always
     ports:
       - "8000:8000"           
-    depends_on:
-      - mosquitto             
     environment:
       - MQTT_BROKER=mosquitto
+      - TB_HOST=thingsboard
+      - PYTHONUNBUFFERED=1
+    
+    # AQUÍ ESTÁ EL TRUCO PARA QUE ESPERE:
+    depends_on:
+      mosquitto:
+        condition: service_started
+      thingsboard:
+        condition: service_healthy  # <--- Solo arranca si TB está "sano"
 
-  # 4. LA NUEVA PANTALLA (ThingsBoard)
-  # Sustituye a Grafana. Panel de control profesional.
+  # 4. LA PLATAFORMA (ThingsBoard)
   thingsboard:
     image: thingsboard/tb-postgres
     container_name: waterly_tb
     restart: always
     ports:
-      - "8080:9090"    # Entrarás por http://localhost:8080
-      - "1884:1883"    # MQTT propio de TB (Puerto 1884 para no chocar con Mosquitto)
+      - "8080:9090"
+      - "1884:1883"
     environment:
       - TB_QUEUE_TYPE=in-memory
     volumes:
       - tb_data:/data
       - tb_log:/var/log/thingsboard
+    
+    # DEFINIMOS QUÉ SIGNIFICA ESTAR "SANO":
+    healthcheck:
+      # Intenta descargar la página de login. Si responde, está vivo.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/login"]
+      interval: 10s       # Prueba cada 10 segundos
+      timeout: 5s         # Si tarda más de 5s, falla
+      retries: 20         # Inténtalo 20 veces antes de rendirte
+      start_period: 60s   # Dale 1 minuto de gracia inicial para arrancar Java
 
-# Volúmenes persistentes (para no perder datos al reiniciar)
 volumes:
   influxdb_data:
   tb_data:

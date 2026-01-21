@@ -2,114 +2,152 @@ import paho.mqtt.client as mqtt
 import json
 import time
 import os
+import requests
 from fastapi import FastAPI
 
 # --- CONFIGURACIÓN ---
-# 1. Credenciales y Direcciones
-# Token copiado de ThingsBoard
 TB_ACCESS_TOKEN = "x35f744geqt5lgsnlwsk" 
-TB_HOST = "thingsboard"  # Nombre del servicio en Docker
-MOSQUITTO_HOST = "mosquitto" # Nombre del servicio en Docker
+TB_HOST = "thingsboard"
+MOSQUITTO_HOST = "mosquitto"
 
-# 2. Clientes MQTT
-# Cliente para hablar con el ESP32 (Mosquitto)
+# Credenciales de Admin (Tenant)
+TB_ADMIN_USER = "tenant@thingsboard.org"
+TB_ADMIN_PASS = "tenant"
+
+# Clientes MQTT
 client_mosquitto = mqtt.Client(client_id="Bridge_To_Mosquitto")
-# Cliente para hablar con la Plataforma (ThingsBoard)
 client_tb = mqtt.Client(client_id="Bridge_To_ThingsBoard")
-
-# Configuramos el usuario de ThingsBoard (así se autentica)
 client_tb.username_pw_set(TB_ACCESS_TOKEN)
 
 app = FastAPI()
 
-
-def on_mosquitto_message(client, userdata, msg):
-    """
-    [ESP32 -> THINGSBOARD]
-    Recibe datos del sensor y los sube a la nube.
-    """
+def autoconfig_thingsboard():
+    print("🔧 [AUTO-CONFIG] Verificando dispositivo en ThingsBoard...")
+    base_url = f"http://{TB_HOST}:9090"
+    
     try:
-        payload = msg.payload.decode()
-        print(f"[ESP32 -> API] Dato recibido: {payload}")
+        # 1. Login
+        resp = requests.post(f"{base_url}/api/auth/login", json={"username": TB_ADMIN_USER, "password": TB_ADMIN_PASS})
+        if resp.status_code != 200:
+            return False 
+            
+        headers = {"X-Authorization": f"Bearer {resp.json()['token']}"}
         
-        # Reenviar a ThingsBoard
-        client_tb.publish("v1/devices/me/telemetry", payload)
-        print("[API -> TB] Dato reenviado a ThingsBoard")
+        # 2. Buscar/Crear Dispositivo
+        device_name = "Waterly_ESP32"
+        check_url = f"{base_url}/api/tenant/devices?deviceName={device_name}"
+        resp = requests.get(check_url, headers=headers)
         
-        
+        device_id = None
+        if resp.status_code == 200:
+            device_id = resp.json()["id"]["id"]
+            print(f"Dispositivo '{device_name}' encontrado (ID: {device_id}).")
+        else:
+            print(f"🛠️ Creando dispositivo '{device_name}'...")
+            new_device = {"name": device_name, "type": "ESP32_Sensor"}
+            resp = requests.post(f"{base_url}/api/device", json=new_device, headers=headers)
+            if resp.status_code == 200:
+                device_id = resp.json()["id"]["id"]
+                print(f"Dispositivo creado con éxito.")
+            else:
+                print(f"Error creando dispositivo: {resp.text}")
+                return True 
+
+        # 3. Forzar Token (AQUÍ ESTABA EL CAMBIO CLAVE)
+        if device_id:
+            # URL para LEER (GET) - Esta sí lleva el ID
+            get_url = f"{base_url}/api/device/{device_id}/credentials"
+            # URL para GUARDAR (POST) - Esta NO lleva el ID en la URL
+            save_url = f"{base_url}/api/device/credentials"
+
+            resp = requests.get(get_url, headers=headers)
+            
+            if resp.status_code == 200:
+                creds_data = resp.json()
+                current_token = creds_data.get("credentialsId")
+                
+                if current_token != TB_ACCESS_TOKEN:
+                    print(f"🔄 El token actual es '{current_token}'. Cambiando a '{TB_ACCESS_TOKEN}'...")
+                    
+                    # Preparamos el paquete
+                    # ThingsBoard necesita el deviceId dentro del JSON para saber a quién actualizar
+                    payload = {
+                        "id": creds_data.get("id"), 
+                        "createdTime": creds_data.get("createdTime"),
+                        "deviceId": creds_data.get("deviceId"), # <--- Importante: mantener esto
+                        "credentialsType": "ACCESS_TOKEN",
+                        "credentialsId": TB_ACCESS_TOKEN,
+                        "credentialsValue": None
+                    }
+
+                    # Enviamos a la URL genérica (save_url)
+                    save_resp = requests.post(save_url, json=payload, headers=headers)
+                    
+                    if save_resp.status_code == 200:
+                        print("✨ ¡Token actualizado con ÉXITO!")
+                    else:
+                        print(f"FALLO al guardar. Código: {save_resp.status_code}")
+                        print(f"Respuesta: {save_resp.text}")
+                else:
+                    print("El Token ya es correcto.")
+            return True
+            
     except Exception as e:
-        print(f"Error procesando mensaje hacia TB: {e}")
+        return False
+    
+    return False
+
+# --- PUENTE MQTT ---
+def on_mosquitto_message(client, userdata, msg):
+    try:
+        # Solo imprimimos si no es spam
+        # print(f"[DATA] {msg.payload.decode()}")
+        client_tb.publish("v1/devices/me/telemetry", msg.payload.decode())
+    except: pass
 
 def on_tb_message(client, userdata, msg):
-    """
-    [THINGSBOARD -> ESP32]
-    Recibe clics en botones y los baja al dispositivo.
-    """
     try:
-        print(f"[TB -> API] Orden recibida: {msg.topic} {msg.payload}")
         data = json.loads(msg.payload)
         method = data.get("method")
         params = data.get("params")
-        
         esp_payload = {}
         
-        # --- TRADUCCIÓN DE ÓRDENES ---
+        if method == "setTraining": esp_payload = {"training": params}
+        elif method == "deepSleep": esp_payload = {"training": False} 
         
-        # CASO 1: Interruptor de Entrenamiento
-        # En TB el método debe llamarse: setTraining
-        if method == "setTraining":
-            esp_payload = {"training": params} # params será true o false
-            
-        # CASO 2: Botón de Dormir
-        # En TB el método debe llamarse: deepSleep
-        elif method == "deepSleep":
-             # Forzamos apagado de entrenamiento, lo que lleva al sleep en tu código C
-             esp_payload = {"training": False} 
-        
-        # --- ENVÍO A MOSQUITTO ---
         if esp_payload:
-            payload_str = json.dumps(esp_payload)
-            
-            # IMPORTANTE: retain=True
-            # Esto hace que si el ESP32 está durmiendo, el mensaje le espere
-            # hasta que se despierte y se conecte.
-            client_mosquitto.publish("waterly/comandos", payload_str, retain=True)
-            
-            print(f"[API -> ESP32] Orden enviada (Retained): {payload_str}")
-            
-    except Exception as e:
-        print(f"Error procesando RPC desde TB: {e}")
+            client_mosquitto.publish("waterly/comandos", json.dumps(esp_payload), retain=True)
+            print(f"[CMD] Enviado: {json.dumps(esp_payload)}")
+    except: pass
 
-
+# --- ARRANQUE ---
 @app.on_event("startup")
 def start_bridge():
-    print(">>> INICIANDO WATERLY BRAIN (BRIDGE MODE) <<<")
+    print(">>> INICIANDO WATERLY BRAIN v2.0 <<<")
     
-    # 1. Conectar a Mosquitto (Escucha al ESP32)
+    tb_ready = False
+    for i in range(30): 
+        if autoconfig_thingsboard():
+            print("🟢 ThingsBoard configurado.")
+            tb_ready = True
+            break
+        print(f"⏳ Intento {i+1}/30: Esperando a ThingsBoard...")
+        time.sleep(5)
+
     try:
         client_mosquitto.connect(MOSQUITTO_HOST, 1883, 60)
         client_mosquitto.subscribe("waterly/datos")
         client_mosquitto.on_message = on_mosquitto_message
         client_mosquitto.loop_start() 
-        print("Conectado a Mosquitto (Broker Local)")
-    except Exception as e:
-        print(f"Error conectando a Mosquitto: {e}")
-
-    # 2. Conectar a ThingsBoard (Envía a la Nube)
-    try:
+        print("✅ Mosquitto Conectado")
+        
         client_tb.connect(TB_HOST, 1883, 60) 
-        # Nos suscribimos a los comandos RPC (Botones del Dashboard)
         client_tb.subscribe("v1/devices/me/rpc/request/+")
         client_tb.on_message = on_tb_message
         client_tb.loop_start() 
-        print("Conectado a ThingsBoard (Dashboard)")
+        print("✅ ThingsBoard MQTT Conectado")
     except Exception as e:
-        print(f"Error conectando a ThingsBoard: {e}")
+        print(f"⚠️ Error MQTT: {e}")
 
 @app.get("/")
-def read_root():
-    return {
-        "status": "Bridge Online", 
-        "mode": "ThingsBoard <-> Mosquitto",
-        "token": "Configured"
-    }
+def read_root(): return {"status": "Online"}
