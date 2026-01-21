@@ -1,70 +1,115 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 import paho.mqtt.client as mqtt
 import json
 import time
-
-app = FastAPI(title="Waterly Brain API")
+import os
+from fastapi import FastAPI
 
 # --- CONFIGURACIÓN ---
-# IMPORTANTE: "mosquitto" es el nombre del servicio en docker-compose
-MQTT_BROKER = "mosquitto" 
-MQTT_PORT = 1883
-TOPIC_CMD = "waterly/comandos"
+# 1. Credenciales y Direcciones
+# Token copiado de ThingsBoard
+TB_ACCESS_TOKEN = "x35f744geqt5lgsnlwsk" 
+TB_HOST = "thingsboard"  # Nombre del servicio en Docker
+MOSQUITTO_HOST = "mosquitto" # Nombre del servicio en Docker
 
-class DeepSleepRequest(BaseModel):
-    minutes: int
+# 2. Clientes MQTT
+# Cliente para hablar con el ESP32 (Mosquitto)
+client_mosquitto = mqtt.Client(client_id="Bridge_To_Mosquitto")
+# Cliente para hablar con la Plataforma (ThingsBoard)
+client_tb = mqtt.Client(client_id="Bridge_To_ThingsBoard")
 
-class TrainingModeRequest(BaseModel):
-    enabled: bool
+# Configuramos el usuario de ThingsBoard (así se autentica)
+client_tb.username_pw_set(TB_ACCESS_TOKEN)
 
-# --- HELPER MQTT ---
-def send_mqtt_cmd(payload: dict):
+app = FastAPI()
+
+
+def on_mosquitto_message(client, userdata, msg):
+    """
+    [ESP32 -> THINGSBOARD]
+    Recibe datos del sensor y los sube a la nube.
+    """
     try:
-        # Creamos cliente nuevo para cada petición (simple y robusto)
-        client = mqtt.Client(client_id="waterly_api_sender")
-        client.connect(MQTT_BROKER, MQTT_PORT, 5)
+        payload = msg.payload.decode()
+        print(f"[ESP32 -> API] Dato recibido: {payload}")
         
-        msg = json.dumps(payload)
-        # Retain=True es CLAVE: Si el ESP32 duerme, el mensaje le espera
-        client.publish(TOPIC_CMD, msg, retain=True)
+        # Reenviar a ThingsBoard
+        client_tb.publish("v1/devices/me/telemetry", payload)
+        print("[API -> TB] Dato reenviado a ThingsBoard")
         
-        client.disconnect()
-        return True
+        
     except Exception as e:
-        print(f"Error MQTT: {e}")
-        return False
+        print(f"Error procesando mensaje hacia TB: {e}")
 
-# --- ENDPOINTS (Tus botones de control) ---
+def on_tb_message(client, userdata, msg):
+    """
+    [THINGSBOARD -> ESP32]
+    Recibe clics en botones y los baja al dispositivo.
+    """
+    try:
+        print(f"[TB -> API] Orden recibida: {msg.topic} {msg.payload}")
+        data = json.loads(msg.payload)
+        method = data.get("method")
+        params = data.get("params")
+        
+        esp_payload = {}
+        
+        # --- TRADUCCIÓN DE ÓRDENES ---
+        
+        # CASO 1: Interruptor de Entrenamiento
+        # En TB el método debe llamarse: setTraining
+        if method == "setTraining":
+            esp_payload = {"training": params} # params será true o false
+            
+        # CASO 2: Botón de Dormir
+        # En TB el método debe llamarse: deepSleep
+        elif method == "deepSleep":
+             # Forzamos apagado de entrenamiento, lo que lleva al sleep en tu código C
+             esp_payload = {"training": False} 
+        
+        # --- ENVÍO A MOSQUITTO ---
+        if esp_payload:
+            payload_str = json.dumps(esp_payload)
+            
+            # IMPORTANTE: retain=True
+            # Esto hace que si el ESP32 está durmiendo, el mensaje le espere
+            # hasta que se despierte y se conecte.
+            client_mosquitto.publish("waterly/comandos", payload_str, retain=True)
+            
+            print(f"[API -> ESP32] Orden enviada (Retained): {payload_str}")
+            
+    except Exception as e:
+        print(f"Error procesando RPC desde TB: {e}")
+
+
+@app.on_event("startup")
+def start_bridge():
+    print(">>> INICIANDO WATERLY BRAIN (BRIDGE MODE) <<<")
+    
+    # 1. Conectar a Mosquitto (Escucha al ESP32)
+    try:
+        client_mosquitto.connect(MOSQUITTO_HOST, 1883, 60)
+        client_mosquitto.subscribe("waterly/datos")
+        client_mosquitto.on_message = on_mosquitto_message
+        client_mosquitto.loop_start() 
+        print("Conectado a Mosquitto (Broker Local)")
+    except Exception as e:
+        print(f"Error conectando a Mosquitto: {e}")
+
+    # 2. Conectar a ThingsBoard (Envía a la Nube)
+    try:
+        client_tb.connect(TB_HOST, 1883, 60) 
+        # Nos suscribimos a los comandos RPC (Botones del Dashboard)
+        client_tb.subscribe("v1/devices/me/rpc/request/+")
+        client_tb.on_message = on_tb_message
+        client_tb.loop_start() 
+        print("Conectado a ThingsBoard (Dashboard)")
+    except Exception as e:
+        print(f"Error conectando a ThingsBoard: {e}")
 
 @app.get("/")
 def read_root():
-    return {"status": "Waterly Brain is Online"}
-
-@app.post("/control/deep-sleep")
-def set_deep_sleep(request: DeepSleepRequest):
-    """Manda al ESP32 a dormir X minutos"""
-    payload = {
-        "cmd": "deep_sleep",
-        "duration_sec": request.minutes * 60
+    return {
+        "status": "Bridge Online", 
+        "mode": "ThingsBoard <-> Mosquitto",
+        "token": "Configured"
     }
-    
-    success = send_mqtt_cmd(payload)
-    if not success:
-        raise HTTPException(status_code=500, detail="Fallo al conectar con MQTT")
-    
-    return {"status": "orden_enviada", "data": payload}
-
-@app.post("/control/training")
-def set_training_mode(request: TrainingModeRequest):
-    """Activa o desactiva el modo entrenamiento"""
-    payload = {
-        "cmd": "training_mode",
-        "value": request.enabled
-    }
-    
-    success = send_mqtt_cmd(payload)
-    if not success:
-        raise HTTPException(status_code=500, detail="Fallo al conectar con MQTT")
-        
-    return {"status": "orden_enviada", "data": payload}
