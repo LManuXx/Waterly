@@ -1,3 +1,3 @@
 idf_component_register(SRCS "main.c"
                     INCLUDE_DIRS "."
-                    REQUIRES as7265x wifi ota ssd1306 mqtt_app)
+                    REQUIRES as7265x wifi ota ssd1306 mqtt_app app_controller)
