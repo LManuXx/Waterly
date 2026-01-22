@@ -27,6 +27,7 @@ services:
       - DOCKER_INFLUXDB_INIT_PASSWORD=adminpassword123
       - DOCKER_INFLUXDB_INIT_ORG=waterly_org
       - DOCKER_INFLUXDB_INIT_BUCKET=sensor_data
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=admin
     volumes:
       - influxdb_data:/var/lib/influxdb2
 

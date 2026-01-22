@@ -4,6 +4,8 @@ import time
 import os
 import requests
 from fastapi import FastAPI
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
 
 # --- CONFIGURACIÓN ---
 TB_ACCESS_TOKEN = "x35f744geqt5lgsnlwsk" 
@@ -14,12 +16,77 @@ MOSQUITTO_HOST = "mosquitto"
 TB_ADMIN_USER = "tenant@thingsboard.org"
 TB_ADMIN_PASS = "tenant"
 
+# --- CONFIGURACION INFLUXDB ---
+# Datos definidos en el docker-compose
+INFLUX_URL = "http://influxdb:8086"
+INFLUX_TOKEN = "admin"
+INFLUX_ORG = "waterly_org"
+INFLUX_BUCKET = "sensor_data"
+
+try:
+    client_influx = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+    write_api = client_influx.write_api(write_options=SYNCHRONOUS)
+    print("Conexion con InfluxDB lista")
+except Exception as e:
+    print(f"Fallo al conectar con InfluxDB: {e}")
+
 # Clientes MQTT
 client_mosquitto = mqtt.Client(client_id="Bridge_To_Mosquitto")
 client_tb = mqtt.Client(client_id="Bridge_To_ThingsBoard")
 client_tb.username_pw_set(TB_ACCESS_TOKEN)
 
 app = FastAPI()
+
+def clean_and_validate_data(raw_json):
+    # Proceso los datos para que no entre basura a la base de datos
+    try:
+        data = json.loads(raw_json)
+        
+        # Diccionario limpio que vamos a devolver
+        clean_data = {}
+        
+        # Lista de sensores que me interesan
+        sensors = ["uv", "vis", "nir"]
+        
+        for key, value in data.items():
+            if key in sensors:
+                # Compruebo que sea un numero
+                if isinstance(value, (int, float)):
+                    # Reglas de negocio: nada de negativos ni valores locos
+                    if value < 0:
+                        print(f"Dato descartado (negativo): {key}={value}")
+                        continue
+                    if value > 10000:
+                        print(f"Dato descartado (demasiado alto): {key}={value}")
+                        continue
+                    
+                    # Si pasa los filtros, pa dentro
+                    clean_data[key] = value
+        
+        return clean_data
+
+    except json.JSONDecodeError:
+        print("Me ha llegado algo que no es JSON valido")
+        return None
+
+def save_to_influx(data):
+    # Guardo los datos ya limpios en InfluxDB
+    try:
+        if not data:
+            return
+
+        # Creo el punto de datos
+        p = Point("water_quality") \
+            .tag("device", "ESP32_01") \
+            .field("uv", float(data.get("uv", 0))) \
+            .field("vis", float(data.get("vis", 0))) \
+            .field("nir", float(data.get("nir", 0)))
+        
+        write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=p)
+        print("Datos guardados en InfluxDB correctamente")
+        
+    except Exception as e:
+        print(f"Error escribiendo en InfluxDB: {e}")
 
 def autoconfig_thingsboard():
     print("🔧 [AUTO-CONFIG] Verificando dispositivo en ThingsBoard...")
@@ -100,10 +167,24 @@ def autoconfig_thingsboard():
 # --- PUENTE MQTT ---
 def on_mosquitto_message(client, userdata, msg):
     try:
-        # Solo imprimimos si no es spam
-        # print(f"[DATA] {msg.payload.decode()}")
-        client_tb.publish("v1/devices/me/telemetry", msg.payload.decode())
-    except: pass
+        raw_payload = msg.payload.decode()
+        
+        # 1. Validar y limpiar datos
+        clean_data = clean_and_validate_data(raw_payload)
+        
+        if clean_data:
+            # 2. Si los datos son buenos, los mando a InfluxDB
+            save_to_influx(clean_data)
+            
+            # 3. Y tambien los mando a ThingsBoard para verlos en la grafica
+            # Reconstruyo el JSON por si he quitado algun valor malo
+            client_tb.publish("v1/devices/me/telemetry", json.dumps(clean_data))
+            print(f"Datos procesados: {clean_data}")
+        else:
+            print("Datos ignorados por no cumplir validacion")
+
+    except Exception as e:
+        print(f"Error en el puente: {e}")
 
 def on_tb_message(client, userdata, msg):
     try:
@@ -139,15 +220,15 @@ def start_bridge():
         client_mosquitto.subscribe("waterly/datos")
         client_mosquitto.on_message = on_mosquitto_message
         client_mosquitto.loop_start() 
-        print("✅ Mosquitto Conectado")
+        print("Mosquitto Conectado")
         
         client_tb.connect(TB_HOST, 1883, 60) 
         client_tb.subscribe("v1/devices/me/rpc/request/+")
         client_tb.on_message = on_tb_message
         client_tb.loop_start() 
-        print("✅ ThingsBoard MQTT Conectado")
+        print("ThingsBoard MQTT Conectado")
     except Exception as e:
-        print(f"⚠️ Error MQTT: {e}")
+        print(f"Error MQTT: {e}")
 
 @app.get("/")
 def read_root(): return {"status": "Online"}
