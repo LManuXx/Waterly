@@ -32,7 +32,8 @@ typedef enum {
     STATE_IDLE,
     STATE_TRAINING,
     STATE_SLEEPING,
-    STATE_UPDATING
+    STATE_UPDATING,
+    STATE_SINGLE_MEASURE
 } app_state_t;
 
 // Variables Privadas
@@ -217,53 +218,65 @@ static void app_controller_task(void *pvParameters) {
         esp_task_wdt_reset();
         if (xQueueReceive(event_queue, &event, 0) == pdTRUE) {
             switch (event) {
+                case APP_EVENT_GO_IDLE:
+                    ESP_LOGI(TAG, ">>> MODO: IDLE <<<");
+                    current_state = STATE_IDLE;
+                    ssd1306_clear();
+                    ssd1306_print(0, 0, "=== WATERLY ===");
+                    ssd1306_print(3, 0, "  Esperando...");
+                    ssd1306_print(7, 0, "Modo: IDLE  :) ");
+                    break;
+
                 case APP_EVENT_START_TRAINING:
-                    if (current_state != STATE_TRAINING) {
-                        ESP_LOGI(TAG, ">>> CAMBIO DE ESTADO: TRAINING <<<");
-                        current_state = STATE_TRAINING;
-                        ssd1306_print(4, 0, "Mode: TRAIN");
-                    }
+                    ESP_LOGI(TAG, ">>> MODO: TRAINING <<<");
+                    current_state = STATE_TRAINING;
                     break;
                     
+                case APP_EVENT_SINGLE_MEASURE:
+                    ESP_LOGI(TAG, ">>> MODO: SINGLE MEASURE <<<");
+                    current_state = STATE_SINGLE_MEASURE;
+                    break;
+
                 case APP_EVENT_STOP_AND_SLEEP:
-                    ESP_LOGI(TAG, ">>> CAMBIO DE ESTADO: PREPARING SLEEP <<<");
+                    ESP_LOGI(TAG, ">>> MODO: SLEEPING <<<");
                     current_state = STATE_SLEEPING;
                     break;
                 
-                case APP_EVENT_START_OTA: // <--- NUEVO CASO
-                    ESP_LOGW(TAG, ">>> CAMBIO DE ESTADO: OTA UPDATE <<<");
+                case APP_EVENT_START_OTA:
+                    ESP_LOGW(TAG, ">>> MODO: OTA UPDATE <<<");
                     current_state = STATE_UPDATING;
                     break;
-                    
-                default: break;
             }
         }
 
         // B. MÁQUINA DE ESTADOS
         switch (current_state) {
             case STATE_IDLE:
-                // Esperando órdenes... parpadeo lento o nada.
+                // No hacemos nada intensivo, solo esperamos el siguiente evento.
                 vTaskDelay(pdMS_TO_TICKS(100));
+                break;
+
+            case STATE_SINGLE_MEASURE:
+                ssd1306_print(7, 0, "Midiendo...  ");
+                tomar_medida_y_enviar(); // Usamos la misma función de medida
+                
+                // TRUCO: Volvemos a IDLE automáticamente tras medir una vez
+                ESP_LOGI(TAG, "Medida única completada, volviendo a IDLE.");
+                current_state = STATE_IDLE; 
+                ssd1306_print(7, 0, "Modo: IDLE   ");
                 break;
 
             case STATE_TRAINING:
                 tomar_medida_y_enviar();
-                // Control de frecuencia de muestreo preciso
                 vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(TIEMPO_ENTRE_MUESTRAS));
                 break;
 
             case STATE_SLEEPING:
-                ir_a_dormir(); // Esta función termina matando al proceso (Deep Sleep)
+                ir_a_dormir(); 
                 break;
-            case STATE_UPDATING: // <--- LÓGICA DEL NUEVO ESTADO
-                // Desactivamos Watchdog temporalmente si la OTA bloquea mucho tiempo
-                // o nos aseguramos de que run_ota_update() lo alimente.
-                // Por seguridad, aumentamos el timeout o confiamos en el reset.
-                //ejecutar_ota(); 
-                ssd1306_clear();
-                ssd1306_print(4, 0, "Actualisando por Ota");
-                ssd1306_print(5, 0, "Cargando...");
-                // Esta función reinicia, así que no llega aquí.
+
+            case STATE_UPDATING:
+                ejecutar_ota(); 
                 break;
         }
     }

@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACION ---
 TB_ACCESS_TOKEN = "x35f744geqt5lgsnlwsk" 
 TB_HOST = "thingsboard"
 MOSQUITTO_HOST = "mosquitto"
@@ -89,7 +89,7 @@ def save_to_influx(data):
         print(f"Error escribiendo en InfluxDB: {e}")
 
 def autoconfig_thingsboard():
-    print("🔧 [AUTO-CONFIG] Verificando dispositivo en ThingsBoard...")
+    print("[AUTO-CONFIG] Verificando dispositivo en ThingsBoard...")
     base_url = f"http://{TB_HOST}:9090"
     
     try:
@@ -110,19 +110,19 @@ def autoconfig_thingsboard():
             device_id = resp.json()["id"]["id"]
             print(f"Dispositivo '{device_name}' encontrado (ID: {device_id}).")
         else:
-            print(f"🛠️ Creando dispositivo '{device_name}'...")
+            print(f"Creando dispositivo '{device_name}'...")
             new_device = {"name": device_name, "type": "ESP32_Sensor"}
             resp = requests.post(f"{base_url}/api/device", json=new_device, headers=headers)
             if resp.status_code == 200:
                 device_id = resp.json()["id"]["id"]
-                print(f"Dispositivo creado con éxito.")
+                print(f"Dispositivo creado con exito.")
             else:
                 print(f"Error creando dispositivo: {resp.text}")
                 return True 
 
-        # 3. Forzar Token (AQUÍ ESTABA EL CAMBIO CLAVE)
+        # 3. Forzar Token
         if device_id:
-            # URL para LEER (GET) - Esta sí lleva el ID
+            # URL para LEER (GET) - Esta si lleva el ID
             get_url = f"{base_url}/api/device/{device_id}/credentials"
             # URL para GUARDAR (POST) - Esta NO lleva el ID en la URL
             save_url = f"{base_url}/api/device/credentials"
@@ -134,26 +134,26 @@ def autoconfig_thingsboard():
                 current_token = creds_data.get("credentialsId")
                 
                 if current_token != TB_ACCESS_TOKEN:
-                    print(f"🔄 El token actual es '{current_token}'. Cambiando a '{TB_ACCESS_TOKEN}'...")
+                    print(f"El token actual es '{current_token}'. Cambiando a '{TB_ACCESS_TOKEN}'...")
                     
                     # Preparamos el paquete
-                    # ThingsBoard necesita el deviceId dentro del JSON para saber a quién actualizar
+                    # ThingsBoard necesita el deviceId dentro del JSON para saber a quien actualizar
                     payload = {
                         "id": creds_data.get("id"), 
                         "createdTime": creds_data.get("createdTime"),
-                        "deviceId": creds_data.get("deviceId"), # <--- Importante: mantener esto
+                        "deviceId": creds_data.get("deviceId"),
                         "credentialsType": "ACCESS_TOKEN",
                         "credentialsId": TB_ACCESS_TOKEN,
                         "credentialsValue": None
                     }
 
-                    # Enviamos a la URL genérica (save_url)
+                    # Enviamos a la URL generica (save_url)
                     save_resp = requests.post(save_url, json=payload, headers=headers)
                     
                     if save_resp.status_code == 200:
-                        print("✨ ¡Token actualizado con ÉXITO!")
+                        print("Token actualizado con EXITO")
                     else:
-                        print(f"FALLO al guardar. Código: {save_resp.status_code}")
+                        print(f"FALLO al guardar. Codigo: {save_resp.status_code}")
                         print(f"Respuesta: {save_resp.text}")
                 else:
                     print("El Token ya es correcto.")
@@ -190,16 +190,41 @@ def on_tb_message(client, userdata, msg):
     try:
         data = json.loads(msg.payload)
         method = data.get("method")
-        params = data.get("params")
-        esp_payload = {}
         
-        if method == "setTraining": esp_payload = {"training": params}
-        elif method == "deepSleep": esp_payload = {"training": False} 
+        esp_payload = {}
+        should_retain = False # Por defecto NO retenemos
+        
+        # --- MODOS (Estados persistentes) -> RETAIN = TRUE ---
+        if method == "setIdle":
+            esp_payload = {"mode": "idle"}
+            should_retain = True 
+            
+        elif method == "startTraining":
+            esp_payload = {"mode": "training"}
+            should_retain = True
+            
+        elif method == "deepSleep":
+            esp_payload = {"mode": "sleep"}
+            should_retain = True
+            
+        # --- ACCIONES (Disparadores únicos) -> RETAIN = FALSE ---
+        elif method == "singleMeasure":
+            esp_payload = {"mode": "single"}
+            should_retain = False # ¡Importante! Si no, medirá en bucle infinito al reiniciar
+            
+        elif method == "startOTA":
+            esp_payload = {"update": True}
+            should_retain = False # ¡Importante! Si no, intentará actualizarse eternamente
         
         if esp_payload:
-            client_mosquitto.publish("waterly/comandos", json.dumps(esp_payload), retain=True)
-            print(f"[CMD] Enviado: {json.dumps(esp_payload)}")
-    except: pass
+            # Publicamos con la bandera de retención dinámica
+            client_mosquitto.publish("waterly/comandos", json.dumps(esp_payload), retain=should_retain)
+            
+            retain_txt = "SI" if should_retain else "NO"
+            print(f"[CMD] Enviado ({method}) | Retain: {retain_txt} | Payload: {json.dumps(esp_payload)}")
+            
+    except Exception as e:
+        print(f"Error gestionando RPC: {e}")
 
 # --- ARRANQUE ---
 @app.on_event("startup")
@@ -209,10 +234,10 @@ def start_bridge():
     tb_ready = False
     for i in range(30): 
         if autoconfig_thingsboard():
-            print("🟢 ThingsBoard configurado.")
+            print("ThingsBoard configurado.")
             tb_ready = True
             break
-        print(f"⏳ Intento {i+1}/30: Esperando a ThingsBoard...")
+        print(f"Intento {i+1}/30: Esperando a ThingsBoard...")
         time.sleep(5)
 
     try:
@@ -222,6 +247,7 @@ def start_bridge():
         client_mosquitto.loop_start() 
         print("Mosquitto Conectado")
         
+        # Suscripcion a RPCs (Comandos desde el Dashboard)
         client_tb.connect(TB_HOST, 1883, 60) 
         client_tb.subscribe("v1/devices/me/rpc/request/+")
         client_tb.on_message = on_tb_message

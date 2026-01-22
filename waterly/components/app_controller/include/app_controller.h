@@ -8,8 +8,9 @@
 typedef enum {
     APP_EVENT_START_TRAINING, // Orden de medir continuo
     APP_EVENT_STOP_AND_SLEEP, // Orden de dormir
-    APP_EVENT_MEASURE_ONCE,    // Medir una vez
-    APP_EVENT_START_OTA
+    APP_EVENT_SINGLE_MEASURE,    // Medir una vez
+    APP_EVENT_START_OTA,
+    APP_EVENT_GO_IDLE
 } app_event_t;
 
 

@@ -24,35 +24,38 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
 
     case MQTT_EVENT_DATA:
-        ESP_LOGI(TAG, "Mensaje MQTT recibido");
+    ESP_LOGI(TAG, "Mensaje MQTT recibido");
+    
+    cJSON *root = cJSON_Parse(event->data);
+    if (root) {
         
-        cJSON *root = cJSON_Parse(event->data);
-        if (root) {
+        // 1. CONTROL DE MODOS
+        cJSON *item_mode = cJSON_GetObjectItem(root, "mode");
+        if (cJSON_IsString(item_mode)) {
+            const char* mode = item_mode->valuestring;
             
-            // 1. COMPROBAR ORDEN DE ENTRENAMIENTO (si hay un json con )
-            cJSON *item_train = cJSON_GetObjectItem(root, "training");
-            if (cJSON_IsBool(item_train)) {
-                bool training = cJSON_IsTrue(item_train);
-                
-                if (training) {
-                    ESP_LOGW(TAG, ">>> Enviando evento: START TRAINING");
-                    app_controller_send_event(APP_EVENT_START_TRAINING);
-                } else {
-                    ESP_LOGW(TAG, ">>> Enviando evento: STOP & SLEEP");
-                    app_controller_send_event(APP_EVENT_STOP_AND_SLEEP);
-                }
+            if (strcmp(mode, "idle") == 0) {
+                app_controller_send_event(APP_EVENT_GO_IDLE);
+            } 
+            else if (strcmp(mode, "single") == 0) {
+                app_controller_send_event(APP_EVENT_SINGLE_MEASURE);
+            } 
+            else if (strcmp(mode, "training") == 0) {
+                app_controller_send_event(APP_EVENT_START_TRAINING);
+            } 
+            else if (strcmp(mode, "sleep") == 0) {
+                app_controller_send_event(APP_EVENT_STOP_AND_SLEEP);
             }
-
-            // 2. COMPROBAR ORDEN DE OTA (NUEVO)
-            // Espera un JSON así: {"update": true}
-            cJSON *item_update = cJSON_GetObjectItem(root, "update");
-            if (cJSON_IsBool(item_update) && cJSON_IsTrue(item_update)) {
-                ESP_LOGW(TAG, ">>> Enviando evento: START OTA UPDATE");
-                app_controller_send_event(APP_EVENT_START_OTA);
-            }
-
-            cJSON_Delete(root);
         }
+
+        // 2. CONTROL DE OTA (Independiente)
+        cJSON *item_update = cJSON_GetObjectItem(root, "update");
+        if (cJSON_IsBool(item_update) && cJSON_IsTrue(item_update)) {
+            app_controller_send_event(APP_EVENT_START_OTA);
+        }
+
+        cJSON_Delete(root);
+    }
         break;
     default: break;
     }
