@@ -946,6 +946,115 @@
             "onClickState": {
               "action": "EXECUTE_RPC",
               "executeRpc": {
+                "method": "setTarget",
+                "requestTimeout": 5000,
+                "requestPersistent": false,
+                "persistentPollingInterval": 1000
+              },
+              "setAttribute": {
+                "scope": "SERVER_SCOPE",
+                "key": "state"
+              },
+              "putTimeSeries": {
+                "key": "state"
+              },
+              "valueToData": {
+                "type": "CONSTANT",
+                "constantValue": "agua_destilada",
+                "valueToDataFunction": "/* Return RPC parameters or attribute/time-series value */\nreturn true;"
+              }
+            },
+            "disabledState": {
+              "action": "DO_NOTHING",
+              "defaultValue": false,
+              "getAttribute": {
+                "key": "state",
+                "scope": null
+              },
+              "getTimeSeries": {
+                "key": "state"
+              },
+              "getAlarmStatus": {
+                "severityList": null,
+                "typeList": null
+              },
+              "dataToValue": {
+                "type": "NONE",
+                "compareToValue": true,
+                "dataToValueFunction": "/* Should return boolean value */\nreturn data;"
+              }
+            },
+            "appearance": {
+              "type": "outlined",
+              "showLabel": true,
+              "label": "Training Mode Agua",
+              "showIcon": true,
+              "icon": "arrow_outward",
+              "iconSize": 24,
+              "iconSizeUnit": "px",
+              "mainColor": "#3FADDD87",
+              "backgroundColor": "#FFFFFF",
+              "autoScale": true,
+              "customStyle": {
+                "enabled": null,
+                "hovered": null,
+                "pressed": null,
+                "activated": null,
+                "disabled": null
+              }
+            }
+          },
+          "title": "Command button",
+          "dropShadow": false,
+          "enableFullscreen": false,
+          "widgetStyle": {},
+          "actions": {},
+          "widgetCss": "",
+          "noDataDisplayMessage": "",
+          "titleFont": {
+            "size": 12,
+            "sizeUnit": "px",
+            "family": null,
+            "weight": null,
+            "style": null,
+            "lineHeight": "1.6"
+          },
+          "showTitleIcon": false,
+          "titleTooltip": "",
+          "titleStyle": {
+            "fontSize": "16px",
+            "fontWeight": 400
+          },
+          "pageSize": 1024,
+          "titleIcon": "",
+          "iconColor": "rgba(0, 0, 0, 0.87)",
+          "iconSize": "14px",
+          "configMode": "basic",
+          "borderRadius": "4px",
+          "datasources": [],
+          "targetDevice": {
+            "type": "device",
+            "deviceId": "f87fdf80-f7b0-11f0-a245-bfcd116b6177"
+          }
+        },
+        "row": 0,
+        "col": 0,
+        "id": "0484c1a5-18b2-2d27-714a-ca0616c14ba0"
+      },
+      "4ef017ed-30d8-6249-9b7e-89c266023f15": {
+        "typeFullFqn": "system.command_button",
+        "type": "rpc",
+        "sizeX": 3,
+        "sizeY": 1,
+        "config": {
+          "showTitle": false,
+          "backgroundColor": "rgba(255, 255, 255, 0)",
+          "color": "rgba(0, 0, 0, 0.87)",
+          "padding": "0px",
+          "settings": {
+            "onClickState": {
+              "action": "EXECUTE_RPC",
+              "executeRpc": {
                 "method": "startTraining",
                 "requestTimeout": 5000,
                 "requestPersistent": false,
@@ -1039,7 +1148,225 @@
         },
         "row": 0,
         "col": 0,
-        "id": "0484c1a5-18b2-2d27-714a-ca0616c14ba0"
+        "id": "4ef017ed-30d8-6249-9b7e-89c266023f15"
+      },
+      "cbbaa43c-ad07-f72f-0c6e-52550c5bd97f": {
+        "typeFullFqn": "system.command_button",
+        "type": "rpc",
+        "sizeX": 3,
+        "sizeY": 1,
+        "config": {
+          "showTitle": false,
+          "backgroundColor": "rgba(255, 255, 255, 0)",
+          "color": "rgba(0, 0, 0, 0.87)",
+          "padding": "0px",
+          "settings": {
+            "onClickState": {
+              "action": "EXECUTE_RPC",
+              "executeRpc": {
+                "method": "setTarget",
+                "requestTimeout": 5000,
+                "requestPersistent": false,
+                "persistentPollingInterval": 1000
+              },
+              "setAttribute": {
+                "key": "state",
+                "scope": "SERVER_SCOPE"
+              },
+              "putTimeSeries": {
+                "key": "state"
+              },
+              "valueToData": {
+                "type": "CONSTANT",
+                "constantValue": "nitrogeno",
+                "valueToDataFunction": "/* Return RPC parameters or attribute/time-series value */\nreturn true;"
+              }
+            },
+            "disabledState": {
+              "action": "DO_NOTHING",
+              "defaultValue": false,
+              "getAttribute": {
+                "key": "state",
+                "scope": null
+              },
+              "getTimeSeries": {
+                "key": "state"
+              },
+              "getAlarmStatus": {
+                "severityList": null,
+                "typeList": null
+              },
+              "dataToValue": {
+                "type": "NONE",
+                "compareToValue": true,
+                "dataToValueFunction": "/* Should return boolean value */\nreturn data;"
+              }
+            },
+            "appearance": {
+              "type": "outlined",
+              "showLabel": true,
+              "label": "Training Mode Nitrogeno",
+              "showIcon": true,
+              "icon": "arrow_outward",
+              "iconSize": 24,
+              "iconSizeUnit": "px",
+              "mainColor": "#DD3F4E87",
+              "backgroundColor": "#FFFFFFE2",
+              "autoScale": true,
+              "customStyle": {
+                "enabled": null,
+                "hovered": null,
+                "pressed": null,
+                "activated": null,
+                "disabled": null
+              }
+            }
+          },
+          "title": "Command button",
+          "dropShadow": false,
+          "enableFullscreen": false,
+          "widgetStyle": {},
+          "actions": {},
+          "widgetCss": "",
+          "noDataDisplayMessage": "",
+          "titleFont": {
+            "size": 12,
+            "sizeUnit": "px",
+            "family": null,
+            "weight": null,
+            "style": null,
+            "lineHeight": "1.6"
+          },
+          "showTitleIcon": false,
+          "titleTooltip": "",
+          "titleStyle": {
+            "fontSize": "16px",
+            "fontWeight": 400
+          },
+          "pageSize": 1024,
+          "titleIcon": "",
+          "iconColor": "rgba(0, 0, 0, 0.87)",
+          "iconSize": "14px",
+          "configMode": "advanced",
+          "borderRadius": "4px",
+          "datasources": [],
+          "targetDevice": {
+            "type": "device",
+            "deviceId": "f87fdf80-f7b0-11f0-a245-bfcd116b6177"
+          }
+        },
+        "row": 0,
+        "col": 0,
+        "id": "cbbaa43c-ad07-f72f-0c6e-52550c5bd97f"
+      },
+      "34bd4517-a3db-cd0d-2823-56f316c24a6c": {
+        "typeFullFqn": "system.command_button",
+        "type": "rpc",
+        "sizeX": 3,
+        "sizeY": 1,
+        "config": {
+          "showTitle": false,
+          "backgroundColor": "rgba(255, 255, 255, 0)",
+          "color": "rgba(0, 0, 0, 0.87)",
+          "padding": "0px",
+          "settings": {
+            "onClickState": {
+              "action": "EXECUTE_RPC",
+              "executeRpc": {
+                "method": "setTarget",
+                "requestTimeout": 5000,
+                "requestPersistent": false,
+                "persistentPollingInterval": 1000
+              },
+              "setAttribute": {
+                "scope": "SERVER_SCOPE",
+                "key": "state"
+              },
+              "putTimeSeries": {
+                "key": "state"
+              },
+              "valueToData": {
+                "type": "CONSTANT",
+                "constantValue": "fosforo",
+                "valueToDataFunction": "/* Return RPC parameters or attribute/time-series value */\nreturn true;"
+              }
+            },
+            "disabledState": {
+              "action": "DO_NOTHING",
+              "defaultValue": false,
+              "getAttribute": {
+                "key": "state",
+                "scope": null
+              },
+              "getTimeSeries": {
+                "key": "state"
+              },
+              "getAlarmStatus": {
+                "severityList": null,
+                "typeList": null
+              },
+              "dataToValue": {
+                "type": "NONE",
+                "compareToValue": true,
+                "dataToValueFunction": "/* Should return boolean value */\nreturn data;"
+              }
+            },
+            "appearance": {
+              "type": "outlined",
+              "showLabel": true,
+              "label": "Fosforo Mode",
+              "showIcon": true,
+              "icon": "arrow_outward",
+              "iconSize": 24,
+              "iconSizeUnit": "px",
+              "mainColor": "#DDD53F87",
+              "backgroundColor": "#FFFFFF",
+              "autoScale": true,
+              "customStyle": {
+                "enabled": null,
+                "hovered": null,
+                "pressed": null,
+                "activated": null,
+                "disabled": null
+              }
+            }
+          },
+          "title": "Command button",
+          "dropShadow": false,
+          "enableFullscreen": false,
+          "widgetStyle": {},
+          "actions": {},
+          "widgetCss": "",
+          "noDataDisplayMessage": "",
+          "titleFont": {
+            "size": 12,
+            "sizeUnit": "px",
+            "family": null,
+            "weight": null,
+            "style": null,
+            "lineHeight": "1.6"
+          },
+          "showTitleIcon": false,
+          "titleTooltip": "",
+          "titleStyle": {
+            "fontSize": "16px",
+            "fontWeight": 400
+          },
+          "pageSize": 1024,
+          "titleIcon": "",
+          "iconColor": "rgba(0, 0, 0, 0.87)",
+          "iconSize": "14px",
+          "configMode": "basic",
+          "borderRadius": "4px",
+          "datasources": [],
+          "targetDevice": {
+            "type": "device",
+            "deviceId": "f87fdf80-f7b0-11f0-a245-bfcd116b6177"
+          }
+        },
+        "row": 0,
+        "col": 0,
+        "id": "34bd4517-a3db-cd0d-2823-56f316c24a6c"
       }
     },
     "states": {
@@ -1050,35 +1377,53 @@
           "main": {
             "widgets": {
               "3c3186e8-a13d-5e36-8998-70550154a8e2": {
-                "sizeX": 13,
-                "sizeY": 9,
+                "sizeX": 11,
+                "sizeY": 10,
                 "mobileHeight": null,
                 "row": 0,
-                "col": 6
+                "col": 4
               },
               "adda7ed6-7984-2d4e-d60d-6f33bf29c159": {
-                "sizeX": 6,
-                "sizeY": 3,
-                "row": 3,
-                "col": 0
+                "sizeX": 4,
+                "sizeY": 2,
+                "row": 0,
+                "col": 19
               },
               "b6fb0b23-aad2-d3a5-635f-3c4d493c42b7": {
-                "sizeX": 6,
-                "sizeY": 3,
+                "sizeX": 4,
+                "sizeY": 2,
                 "row": 0,
                 "col": 0
               },
               "a95f2cbd-7c16-a597-63d2-cadf8fe11ca8": {
-                "sizeX": 6,
-                "sizeY": 3,
+                "sizeX": 4,
+                "sizeY": 2,
                 "row": 0,
-                "col": 19
+                "col": 15
               },
               "0484c1a5-18b2-2d27-714a-ca0616c14ba0": {
-                "sizeX": 6,
-                "sizeY": 3,
-                "row": 3,
-                "col": 19
+                "sizeX": 4,
+                "sizeY": 1,
+                "row": 6,
+                "col": 17
+              },
+              "4ef017ed-30d8-6249-9b7e-89c266023f15": {
+                "sizeX": 4,
+                "sizeY": 2,
+                "row": 2,
+                "col": 17
+              },
+              "cbbaa43c-ad07-f72f-0c6e-52550c5bd97f": {
+                "sizeX": 4,
+                "sizeY": 1,
+                "row": 4,
+                "col": 17
+              },
+              "34bd4517-a3db-cd0d-2823-56f316c24a6c": {
+                "sizeX": 4,
+                "sizeY": 1,
+                "row": 5,
+                "col": 17
               }
             },
             "gridSettings": {

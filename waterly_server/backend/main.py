@@ -17,11 +17,14 @@ TB_ADMIN_USER = "tenant@thingsboard.org"
 TB_ADMIN_PASS = "tenant"
 
 # --- CONFIGURACION INFLUXDB ---
-# Datos definidos en el docker-compose
 INFLUX_URL = "http://influxdb:8086"
 INFLUX_TOKEN = "admin"
 INFLUX_ORG = "waterly_org"
 INFLUX_BUCKET = "sensor_data"
+
+# --- MEMORIA DE LA API ---
+# Aqui guardamos que estamos midiendo actualmente
+CURRENT_LABEL = "Unknown" 
 
 try:
     client_influx = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
@@ -38,52 +41,50 @@ client_tb.username_pw_set(TB_ACCESS_TOKEN)
 app = FastAPI()
 
 def clean_and_validate_data(raw_json):
-    # Proceso los datos para que no entre basura a la base de datos
+    # Proceso los datos y les pego la etiqueta actual
     try:
         data = json.loads(raw_json)
-        
-        # Diccionario limpio que vamos a devolver
         clean_data = {}
         
-        # Lista de sensores que me interesan
+        # Validamos que los sensores envien numeros
         sensors = ["uv", "vis", "nir"]
+        for key in sensors:
+            if key in data:
+                val = data[key]
+                if isinstance(val, (int, float)):
+                    # Filtro basico de rango
+                    if 0 <= val <= 65000:
+                        clean_data[key] = val
         
-        for key, value in data.items():
-            if key in sensors:
-                # Compruebo que sea un numero
-                if isinstance(value, (int, float)):
-                    # Reglas de negocio: nada de negativos ni valores locos
-                    if value < 0:
-                        print(f"Dato descartado (negativo): {key}={value}")
-                        continue
-                    if value > 10000:
-                        print(f"Dato descartado (demasiado alto): {key}={value}")
-                        continue
-                    
-                    # Si pasa los filtros, pa dentro
-                    clean_data[key] = value
+        # AQUI ESTA LA MAGIA:
+        # Inyectamos la etiqueta que tenemos en la memoria de la API
+        clean_data["target"] = CURRENT_LABEL
         
-        return clean_data
+        # Solo devolvemos datos si hay lecturas validas
+        if "uv" in clean_data:
+            return clean_data
+        
+        return None
 
     except json.JSONDecodeError:
-        print("Me ha llegado algo que no es JSON valido")
+        print("JSON invalido recibido")
         return None
 
 def save_to_influx(data):
-    # Guardo los datos ya limpios en InfluxDB
     try:
-        if not data:
-            return
+        if not data: return
 
-        # Creo el punto de datos
+        # Guardamos en InfluxDB usando la etiqueta inyectada como TAG
+        # Esto nos permitira filtrar luego por 'Nitrogeno', 'Potasio', etc.
         p = Point("water_quality") \
             .tag("device", "ESP32_01") \
+            .tag("component", data["target"]) \
             .field("uv", float(data.get("uv", 0))) \
             .field("vis", float(data.get("vis", 0))) \
             .field("nir", float(data.get("nir", 0)))
         
         write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=p)
-        print("Datos guardados en InfluxDB correctamente")
+        print(f"Guardado en InfluxDB | Target: {data['target']} | UV: {data['uv']}")
         
     except Exception as e:
         print(f"Error escribiendo en InfluxDB: {e}")
@@ -122,9 +123,7 @@ def autoconfig_thingsboard():
 
         # 3. Forzar Token
         if device_id:
-            # URL para LEER (GET) - Esta si lleva el ID
             get_url = f"{base_url}/api/device/{device_id}/credentials"
-            # URL para GUARDAR (POST) - Esta NO lleva el ID en la URL
             save_url = f"{base_url}/api/device/credentials"
 
             resp = requests.get(get_url, headers=headers)
@@ -134,10 +133,8 @@ def autoconfig_thingsboard():
                 current_token = creds_data.get("credentialsId")
                 
                 if current_token != TB_ACCESS_TOKEN:
-                    print(f"El token actual es '{current_token}'. Cambiando a '{TB_ACCESS_TOKEN}'...")
+                    print(f"Actualizando token a '{TB_ACCESS_TOKEN}'...")
                     
-                    # Preparamos el paquete
-                    # ThingsBoard necesita el deviceId dentro del JSON para saber a quien actualizar
                     payload = {
                         "id": creds_data.get("id"), 
                         "createdTime": creds_data.get("createdTime"),
@@ -147,14 +144,12 @@ def autoconfig_thingsboard():
                         "credentialsValue": None
                     }
 
-                    # Enviamos a la URL generica (save_url)
                     save_resp = requests.post(save_url, json=payload, headers=headers)
                     
                     if save_resp.status_code == 200:
                         print("Token actualizado con EXITO")
                     else:
-                        print(f"FALLO al guardar. Codigo: {save_resp.status_code}")
-                        print(f"Respuesta: {save_resp.text}")
+                        print(f"FALLO al guardar token: {save_resp.status_code}")
                 else:
                     print("El Token ya es correcto.")
             return True
@@ -164,38 +159,49 @@ def autoconfig_thingsboard():
     
     return False
 
-# --- PUENTE MQTT ---
+# --- PUENTE MQTT (ESP32 -> NUBE) ---
 def on_mosquitto_message(client, userdata, msg):
     try:
         raw_payload = msg.payload.decode()
         
-        # 1. Validar y limpiar datos
+        # 1. Validar, limpiar e inyectar etiqueta
         clean_data = clean_and_validate_data(raw_payload)
         
         if clean_data:
-            # 2. Si los datos son buenos, los mando a InfluxDB
+            # 2. Guardar en InfluxDB con la etiqueta correcta
             save_to_influx(clean_data)
             
-            # 3. Y tambien los mando a ThingsBoard para verlos en la grafica
-            # Reconstruyo el JSON por si he quitado algun valor malo
+            # 3. Enviar a ThingsBoard para visualizacion en tiempo real
             client_tb.publish("v1/devices/me/telemetry", json.dumps(clean_data))
-            print(f"Datos procesados: {clean_data}")
         else:
-            print("Datos ignorados por no cumplir validacion")
+            # Datos ignorados (ruido o error)
+            pass
 
     except Exception as e:
-        print(f"Error en el puente: {e}")
+        print(f"Error en el puente de datos: {e}")
 
+# --- PUENTE MQTT (NUBE -> ESP32) ---
 def on_tb_message(client, userdata, msg):
+    global CURRENT_LABEL # Usamos la variable global
+    
     try:
         data = json.loads(msg.payload)
         method = data.get("method")
+        params = data.get("params")
         
         esp_payload = {}
-        should_retain = False # Por defecto NO retenemos
+        should_retain = False 
         
-        # --- MODOS (Estados persistentes) -> RETAIN = TRUE ---
-        if method == "setIdle":
+        # --- CASO 1: CAMBIO DE ETIQUETA (Solo API) ---
+        if method == "setTarget":
+            # Actualizamos la memoria de la API
+            # El ESP32 no necesita saber esto
+            CURRENT_LABEL = str(params)
+            print(f"[API] Etiqueta cambiada a: {CURRENT_LABEL}")
+            return 
+
+        # --- CASO 2: MODOS (Persistentes -> Retain TRUE) ---
+        elif method == "setIdle":
             esp_payload = {"mode": "idle"}
             should_retain = True 
             
@@ -207,21 +213,19 @@ def on_tb_message(client, userdata, msg):
             esp_payload = {"mode": "sleep"}
             should_retain = True
             
-        # --- ACCIONES (Disparadores únicos) -> RETAIN = FALSE ---
+        # --- CASO 3: ACCIONES (Unicas -> Retain FALSE) ---
         elif method == "singleMeasure":
             esp_payload = {"mode": "single"}
-            should_retain = False # ¡Importante! Si no, medirá en bucle infinito al reiniciar
+            should_retain = False 
             
         elif method == "startOTA":
             esp_payload = {"update": True}
-            should_retain = False # ¡Importante! Si no, intentará actualizarse eternamente
+            should_retain = False 
         
+        # Si hay comando para el hardware, lo enviamos
         if esp_payload:
-            # Publicamos con la bandera de retención dinámica
             client_mosquitto.publish("waterly/comandos", json.dumps(esp_payload), retain=should_retain)
-            
-            retain_txt = "SI" if should_retain else "NO"
-            print(f"[CMD] Enviado ({method}) | Retain: {retain_txt} | Payload: {json.dumps(esp_payload)}")
+            print(f"[CMD] Enviado a ESP32: {method} | Retain: {should_retain}")
             
     except Exception as e:
         print(f"Error gestionando RPC: {e}")
@@ -229,7 +233,7 @@ def on_tb_message(client, userdata, msg):
 # --- ARRANQUE ---
 @app.on_event("startup")
 def start_bridge():
-    print(">>> INICIANDO WATERLY BRAIN v2.0 <<<")
+    print(">>> INICIANDO WATERLY BRAIN v2.1 (Smart Server Mode) <<<")
     
     tb_ready = False
     for i in range(30): 
@@ -247,14 +251,13 @@ def start_bridge():
         client_mosquitto.loop_start() 
         print("Mosquitto Conectado")
         
-        # Suscripcion a RPCs (Comandos desde el Dashboard)
         client_tb.connect(TB_HOST, 1883, 60) 
         client_tb.subscribe("v1/devices/me/rpc/request/+")
         client_tb.on_message = on_tb_message
         client_tb.loop_start() 
-        print("ThingsBoard MQTT Conectado")
+        print("ThingsBoard RPC Conectado")
     except Exception as e:
         print(f"Error MQTT: {e}")
 
 @app.get("/")
-def read_root(): return {"status": "Online"}
+def read_root(): return {"status": "Online", "current_target": CURRENT_LABEL}
