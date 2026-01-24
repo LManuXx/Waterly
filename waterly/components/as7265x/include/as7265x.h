@@ -1,83 +1,80 @@
 #ifndef AS7265X_H
 #define AS7265X_H
 
-#include <stdint.h>
-#include "esp_err.h"
 #include "driver/i2c.h"
+#include "esp_err.h"
+#include <stdbool.h>
 
-// Dirección I2C predeterminada del AS72651 (Master) [cite: 551]
+// Dirección I2C física del chip (siempre es 0x49)
 #define AS7265X_I2C_ADDR 0x49
 
-// Estructura para almacenar los valores calibrados (float) de los 18 canales
-// Los canales van desde UV hasta NIR [cite: 8]
-typedef struct {
-    float A; // 410nm
-    float B; // 435nm
-    float C; // 460nm
-    float D; // 485nm
-    float E; // 510nm
-    float F; // 535nm
-    float G; // 560nm
-    float H; // 585nm
-    float I; // 645nm (Datasheet gap noted)
-    float J; // 705nm
-    float K; // 900nm
-    float L; // 940nm
-    float R; // 610nm
-    float S; // 680nm
-    float T; // 730nm
-    float U; // 760nm
-    float V; // 810nm
-    float W; // 860nm
-} as7265x_values_t;
-
-typedef enum {
-    AS7265X_GAIN_1X = 0,
-    AS7265X_GAIN_3_7X = 1,
-    AS7265X_GAIN_16X = 2,
-    AS7265X_GAIN_64X = 3
-} as7265x_gain_t;
-
-typedef enum {
-    AS7265X_MEASUREMENT_MODE_4_CHAN = 0,
-    AS7265X_MEASUREMENT_MODE_4_CHAN_2 = 1,
-    AS7265X_MEASUREMENT_MODE_6_CHAN_CONTINUOUS = 2, // Lee los 6 canales de cada sensor (18 total) continuamente
-    AS7265X_MEASUREMENT_MODE_6_CHAN_ONE_SHOT = 3    // Lee una vez y espera
-} as7265x_mode_t;
-
+// Estructura de configuración
 typedef struct {
     i2c_port_t i2c_port;
 } as7265x_handle_t;
 
+// Estructura de datos (18 canales)
+typedef struct {
+    float A, B, C, D, E, F; // UV (Slave 2)
+    float G, H, I, J, K, L; // VIS (Slave 1)
+    float R, S, T, U, V, W; // NIR (Master)
+} as7265x_values_t;
+
+// --- DEFINICIONES DE GANANCIA ---
+typedef enum {
+    AS7265X_GAIN_1X = 0,
+    AS7265X_GAIN_37X = 1,
+    AS7265X_GAIN_16X = 2,
+    AS7265X_GAIN_64X = 3
+} as7265x_gain_t;
+
+// --- DEFINICIONES DE MODO (Nombres corregidos para tu app_controller) ---
+typedef enum {
+    AS7265X_MEASUREMENT_MODE_4_CHAN = 0,
+    AS7265X_MEASUREMENT_MODE_4_CHAN_2 = 1,
+    AS7265X_MEASUREMENT_MODE_6_CHAN_CONTINUOUS = 2,
+    AS7265X_MEASUREMENT_MODE_6_CHAN_ONE_SHOT = 3
+} as7265x_mode_t;
+
+// --- PROTOTIPOS ---
+
 /**
- * @brief Inicializa el sensor verificando la conexión
+ * @brief Inicializa la comunicación con el chipset AS7265x.
  */
 esp_err_t as7265x_init(as7265x_handle_t *handle, i2c_port_t port);
 
 /**
- * @brief Configura la ganancia y el modo de medición
- * Registro 0x04 [cite: 703]
+ * @brief Comprueba si hay datos nuevos listos para leer.
+ * Consulta el bit DATA_RDY del registro de configuración.
  */
-esp_err_t as7265x_set_config(as7265x_handle_t *handle, as7265x_mode_t mode, as7265x_gain_t gain);
+bool as7265x_data_ready(as7265x_handle_t *handle);
 
 /**
- * @brief Configura el tiempo de integración
- * Valor * 2.8ms = Tiempo real [cite: 711]
+ * @brief Lee los 18 canales calibrados.
+ * Maneja la conmutación de DEV_SEL automáticamente.
  */
-esp_err_t as7265x_set_integration_time(as7265x_handle_t *handle, uint8_t value);
+esp_err_t as7265x_get_all_values(as7265x_handle_t *handle, as7265x_values_t *values);
 
 /**
- * @brief Controla el LED de iluminación (White LED)
- * [cite: 724]
+ * @brief Configura la bombilla (LED blanco/UV shutter)
+ * current_code: 0=12.5mA, 1=25mA, 2=50mA, 3=100mA
  */
 esp_err_t as7265x_set_bulb_current(as7265x_handle_t *handle, uint8_t current_code, bool enable);
 
 /**
- * @brief Lee todos los valores calibrados (floats)
- * Convierte automáticamente de IEEE 754 Big Endian a float nativo del ESP32.
+ * @brief Configura el LED indicador.
  */
-esp_err_t as7265x_get_all_values(as7265x_handle_t *handle, as7265x_values_t *values);
+esp_err_t as7265x_set_indicator_led(as7265x_handle_t *handle, bool enable, uint8_t current_code);
 
-bool as7265x_data_ready(as7265x_handle_t *handle);
+/**
+ * @brief Establece ganancia y modo.
+ */
+esp_err_t as7265x_set_config(as7265x_handle_t *handle, as7265x_mode_t mode, as7265x_gain_t gain);
 
-#endif // AS7265X_H
+/**
+ * @brief Establece tiempo de integración.
+ * Time = value * 2.8ms.
+ */
+esp_err_t as7265x_set_integration_time(as7265x_handle_t *handle, uint8_t value);
+
+#endif

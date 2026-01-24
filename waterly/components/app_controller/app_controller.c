@@ -174,7 +174,7 @@ static void tomar_medida_y_enviar() {
             // 2. ENVIAR A MQTT (Nube)
             // Enviamos con precisión decimal si cambiaste la función mqtt a float, 
             // si no, el cast (int) está bien para pruebas.
-            mqtt_app_send_data((int)data.A, (int)data.G, (int)data.W);
+            mqtt_app_send_full_spectrum(&data);
 
         } else {
             ESP_LOGE(TAG, "Error I2C al leer registros");

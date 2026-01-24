@@ -23,7 +23,6 @@ INFLUX_ORG = "waterly_org"
 INFLUX_BUCKET = "sensor_data"
 
 # --- MEMORIA DE LA API ---
-# Aqui guardamos que estamos midiendo actualmente
 CURRENT_LABEL = "Unknown" 
 
 try:
@@ -41,27 +40,27 @@ client_tb.username_pw_set(TB_ACCESS_TOKEN)
 app = FastAPI()
 
 def clean_and_validate_data(raw_json):
-    # Proceso los datos y les pego la etiqueta actual
+    """
+    MODIFICADO: Ahora es dinámico. Acepta cualquier clave numérica
+    que envíe el ESP32 (A_410nm, G_560nm, etc.)
+    """
     try:
         data = json.loads(raw_json)
         clean_data = {}
         
-        # Validamos que los sensores envien numeros
-        sensors = ["uv", "vis", "nir"]
-        for key in sensors:
-            if key in data:
-                val = data[key]
-                if isinstance(val, (int, float)):
-                    # Filtro basico de rango
-                    if 0 <= val <= 65000:
-                        clean_data[key] = val
+        # Recorremos TODAS las claves que vienen en el JSON
+        for key, val in data.items():
+            # Si el valor es un número (int o float), lo guardamos
+            if isinstance(val, (int, float)):
+                # Filtro de seguridad: ignorar valores corruptos extremos
+                if -1000 <= val <= 100000: 
+                    clean_data[key] = val
         
-        # AQUI ESTA LA MAGIA:
-        # Inyectamos la etiqueta que tenemos en la memoria de la API
+        # Inyectamos la etiqueta actual
         clean_data["target"] = CURRENT_LABEL
         
-        # Solo devolvemos datos si hay lecturas validas
-        if "uv" in clean_data:
+        # Si hemos recuperado al menos 1 dato numérico, es válido
+        if len(clean_data) > 1: # >1 porque "target" siempre está
             return clean_data
         
         return None
@@ -71,25 +70,32 @@ def clean_and_validate_data(raw_json):
         return None
 
 def save_to_influx(data):
+    """
+    MODIFICADO: Guarda dinámicamente todos los campos recibidos
+    """
     try:
         if not data: return
 
-        # Guardamos en InfluxDB usando la etiqueta inyectada como TAG
-        # Esto nos permitira filtrar luego por 'Nitrogeno', 'Potasio', etc.
+        # Creamos el Punto base
         p = Point("water_quality") \
             .tag("device", "ESP32_01") \
-            .tag("component", data["target"]) \
-            .field("uv", float(data.get("uv", 0))) \
-            .field("vis", float(data.get("vis", 0))) \
-            .field("nir", float(data.get("nir", 0)))
+            .tag("component", data["target"])
+
+        # Bucle Mágico: Añadimos cada lectura como un 'field' automáticamente
+        for key, val in data.items():
+            if key != "target": # La etiqueta ya la usamos arriba como tag, no la duplicamos como field
+                p.field(key, float(val))
         
         write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=p)
-        print(f"Guardado en InfluxDB | Target: {data['target']} | UV: {data['uv']}")
+        
+        # Log resumido (Muestra cantidad de campos guardados)
+        print(f"InfluxDB: Guardados {len(data)-1} canales | Target: {data['target']}")
         
     except Exception as e:
         print(f"Error escribiendo en InfluxDB: {e}")
 
 def autoconfig_thingsboard():
+    # ... (Esta función NO cambia, es correcta) ...
     print("[AUTO-CONFIG] Verificando dispositivo en ThingsBoard...")
     base_url = f"http://{TB_HOST}:9090"
     
@@ -164,17 +170,16 @@ def on_mosquitto_message(client, userdata, msg):
     try:
         raw_payload = msg.payload.decode()
         
-        # 1. Validar, limpiar e inyectar etiqueta
+        # 1. Validar y limpiar (Ahora acepta los 18 canales)
         clean_data = clean_and_validate_data(raw_payload)
         
         if clean_data:
-            # 2. Guardar en InfluxDB con la etiqueta correcta
+            # 2. Guardar en InfluxDB (Guarda los 18 campos dinámicamente)
             save_to_influx(clean_data)
             
-            # 3. Enviar a ThingsBoard para visualizacion en tiempo real
+            # 3. Enviar a ThingsBoard (ThingsBoard crea las variables automáticamente al recibirlas)
             client_tb.publish("v1/devices/me/telemetry", json.dumps(clean_data))
         else:
-            # Datos ignorados (ruido o error)
             pass
 
     except Exception as e:
@@ -182,7 +187,8 @@ def on_mosquitto_message(client, userdata, msg):
 
 # --- PUENTE MQTT (NUBE -> ESP32) ---
 def on_tb_message(client, userdata, msg):
-    global CURRENT_LABEL # Usamos la variable global
+    # ... (Esta función NO cambia, es correcta para recibir comandos) ...
+    global CURRENT_LABEL
     
     try:
         data = json.loads(msg.payload)
@@ -192,15 +198,11 @@ def on_tb_message(client, userdata, msg):
         esp_payload = {}
         should_retain = False 
         
-        # --- CASO 1: CAMBIO DE ETIQUETA (Solo API) ---
         if method == "setTarget":
-            # Actualizamos la memoria de la API
-            # El ESP32 no necesita saber esto
             CURRENT_LABEL = str(params)
             print(f"[API] Etiqueta cambiada a: {CURRENT_LABEL}")
             return 
 
-        # --- CASO 2: MODOS (Persistentes -> Retain TRUE) ---
         elif method == "setIdle":
             esp_payload = {"mode": "idle"}
             should_retain = True 
@@ -213,7 +215,6 @@ def on_tb_message(client, userdata, msg):
             esp_payload = {"mode": "sleep"}
             should_retain = True
             
-        # --- CASO 3: ACCIONES (Unicas -> Retain FALSE) ---
         elif method == "singleMeasure":
             esp_payload = {"mode": "single"}
             should_retain = False 
@@ -222,7 +223,6 @@ def on_tb_message(client, userdata, msg):
             esp_payload = {"update": True}
             should_retain = False 
         
-        # Si hay comando para el hardware, lo enviamos
         if esp_payload:
             client_mosquitto.publish("waterly/comandos", json.dumps(esp_payload), retain=should_retain)
             print(f"[CMD] Enviado a ESP32: {method} | Retain: {should_retain}")
@@ -233,8 +233,9 @@ def on_tb_message(client, userdata, msg):
 # --- ARRANQUE ---
 @app.on_event("startup")
 def start_bridge():
-    print(">>> INICIANDO WATERLY BRAIN v2.1 (Smart Server Mode) <<<")
+    print(">>> INICIANDO WATERLY BRAIN v2.2 (Full Spectrum Support) <<<")
     
+    # ... (Resto del arranque igual) ...
     tb_ready = False
     for i in range(30): 
         if autoconfig_thingsboard():

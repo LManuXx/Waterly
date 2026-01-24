@@ -118,14 +118,48 @@ void mqtt_app_start(void) {
     esp_mqtt_client_start(client);
 }
 
-void mqtt_app_send_data(int uv, int vis, int nir) {
-    if (client == NULL) return;
+void mqtt_app_send_full_spectrum(as7265x_values_t *vals) {
+    if (client == NULL) {
+        ESP_LOGE(TAG, "Cliente MQTT no conectado, no se pueden enviar datos.");
+        return;
+    }
+
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "uv", uv);
-    cJSON_AddNumberToObject(root, "vis", vis);
-    cJSON_AddNumberToObject(root, "nir", nir);
+
+    // --- GRUPO 1: UV (Ultravioleta - Slave 2) ---
+    cJSON_AddNumberToObject(root, "A_410nm", vals->A);
+    cJSON_AddNumberToObject(root, "B_435nm", vals->B);
+    cJSON_AddNumberToObject(root, "C_460nm", vals->C);
+    cJSON_AddNumberToObject(root, "D_485nm", vals->D);
+    cJSON_AddNumberToObject(root, "E_510nm", vals->E);
+    cJSON_AddNumberToObject(root, "F_535nm", vals->F);
+
+    // --- GRUPO 2: VIS (Visible - Slave 1) ---
+    cJSON_AddNumberToObject(root, "G_560nm", vals->G);
+    cJSON_AddNumberToObject(root, "H_585nm", vals->H);
+    cJSON_AddNumberToObject(root, "I_645nm", vals->I);
+    cJSON_AddNumberToObject(root, "J_705nm", vals->J);
+    cJSON_AddNumberToObject(root, "K_900nm", vals->K);
+    cJSON_AddNumberToObject(root, "L_940nm", vals->L);
+
+    // --- GRUPO 3: NIR (Infrarrojo - Master) ---
+    cJSON_AddNumberToObject(root, "R_610nm", vals->R);
+    cJSON_AddNumberToObject(root, "S_680nm", vals->S);
+    cJSON_AddNumberToObject(root, "T_730nm", vals->T);
+    cJSON_AddNumberToObject(root, "U_760nm", vals->U);
+    cJSON_AddNumberToObject(root, "V_810nm", vals->V);
+    cJSON_AddNumberToObject(root, "W_860nm", vals->W);
+
+    // Convertir a texto
     char *post_data = cJSON_PrintUnformatted(root);
+    
+    // NOTA: Si usas ThingsBoard estándar, el topic suele ser "v1/devices/me/telemetry"
+    // Pero mantengo tu topic "waterly/datos" para que funcione con tu configuración actual.
     esp_mqtt_client_publish(client, "waterly/datos", post_data, 0, 0, 0);
+    
+    ESP_LOGI(TAG, "Datos espectrales enviados (%d bytes)", strlen(post_data));
+
+    // Limpieza de memoria (CRÍTICO)
     cJSON_Delete(root);
     free(post_data);
 }
