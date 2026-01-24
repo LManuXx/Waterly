@@ -74,7 +74,7 @@ void app_main(void)
         // arrancamos el modo entrenamiento por defecto.
         // Nota: app_controller gestiona internamente si cambia de estado.
         ESP_LOGW(TAG, "Enviando señal de arranque por defecto...");
-        app_controller_send_event(APP_EVENT_START_TRAINING);
+        app_controller_send_event(APP_EVENT_GO_IDLE);
 
     } else {
         ssd1306_print(2, 0, "Error WiFi");

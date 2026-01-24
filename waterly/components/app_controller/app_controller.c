@@ -230,6 +230,7 @@ static void app_controller_task(void *pvParameters) {
                 case APP_EVENT_START_TRAINING:
                     ESP_LOGI(TAG, ">>> MODO: TRAINING <<<");
                     current_state = STATE_TRAINING;
+                    last_wake_time = xTaskGetTickCount();
                     break;
                     
                 case APP_EVENT_SINGLE_MEASURE:
