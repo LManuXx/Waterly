@@ -176,89 +176,79 @@ def on_mosquitto_message(client, userdata, msg):
     
     try:
         raw_payload = msg.payload.decode()
+        # clean_and_validate debe dejar pasar los datos crudos tal cual
         raw_data = clean_and_validate_data(raw_payload)
         
-        if raw_data:
-            # --- ZONA DE CALIBRACIÓN MULTI-MUESTRA ---
-            if CALIBRATION_STATE["active"]:
-                CALIBRATION_STATE["current_buffer"].append(raw_data)
-                count = len(CALIBRATION_STATE["current_buffer"])
-                target = CALIBRATION_STATE["target_count"]
-                print(f"[CALIBRANDO] Muestra recibida {count}/{target}")
+        if not raw_data: return
+
+        # --- CASO 1: ESTAMOS CALIBRANDO (Creando nuevo modelo base) ---
+        if CALIBRATION_STATE["active"]:
+            # 1. Acumulamos la muestra cruda
+            CALIBRATION_STATE["current_buffer"].append(raw_data)
+            
+            count = len(CALIBRATION_STATE["current_buffer"])
+            target = CALIBRATION_STATE["target_count"]
+            
+            print(f"[CALIBRANDO] Muestra {count}/{target} recibida.")
+            
+            if count < target:
+                # Ping-Pong: Pedimos la siguiente
+                time.sleep(0.1)
+                client_mosquitto.publish("waterly/comandos", json.dumps({"mode": "single"}), retain=False)
+            else:
+                # Fin del bucle: Mandamos todo al cerebro para que filtre y promedie
+                print("[CALIBRANDO] Finalizado. Enviando al cerebro...")
+                success = brain.calibrate(CALIBRATION_STATE["current_buffer"])
                 
-                if count < target:
-                    time.sleep(0.1) 
-                    client_mosquitto.publish("waterly/comandos", json.dumps({"mode": "single"}), retain=False)
+                if success:
+                    print("--> CALIBRACIÓN GUARDADA CORRECTAMENTE.")
                 else:
-                    print("[CALIBRANDO] Calculando promedio...")
-                    avg_data = calculate_average_spectrum(CALIBRATION_STATE["current_buffer"])
-                    if avg_data:
-                        brain.calibrate(avg_data)
-                        print(f"--> ÉXITO: Línea base establecida.")
-                    else:
-                        print("--> ERROR: No se pudo promediar.")
-                    CALIBRATION_STATE["active"] = False
-                    CALIBRATION_STATE["current_buffer"] = []
-                return 
-            # -------------------------------------------
-
-            # 1. Guardar RAW en Influx
-            raw_data["target"] = CURRENT_LABEL
-            save_to_influx(raw_data, is_absorbance=False)
+                    print("--> FALLO EN CALIBRACIÓN (Muestras inválidas).")
+                
+                # Resetear estado y VOLVER AL FLUJO NORMAL
+                CALIBRATION_STATE["active"] = False
+                CALIBRATION_STATE["current_buffer"] = []
             
-            # 2. Calcular Absorbancia
-            abs_data, is_calibrated = brain.get_absorbance(raw_data)
-            
-            pc1, pc2 = 0.0, 0.0
-            if is_calibrated:
-                brain.update_pca(abs_data)
-                pc1, pc2 = brain.get_coords(abs_data)
-            
-            # 3. EMPAQUETADO MIXTO
-            final_package = abs_data.copy()
+            # IMPORTANTE: Durante la calibración NO enviamos nada a ThingsBoard
+            return 
 
-            # A) Limpieza de negativos
-            for k, v in final_package.items():
-                if isinstance(v, (int, float)) and v < 0:
-                     # Solo limpiamos si parece un canal espectral (tiene números en el nombre)
-                     if any(char.isdigit() for char in k):
-                        final_package[k] = 0.0
+        # --- CASO 2: MEDICIÓN NORMAL (Usando el modelo actual) ---
+        
+        # 1. Calcular Absorbancia basada en la calibración guardada
+        abs_data, is_calibrated = brain.get_absorbance(raw_data)
+        
+        # 2. Consultar a la IA (Lo implementaremos a fondo luego, ahora solo coordenadas)
+        pc1, pc2 = brain.get_coords(abs_data)
+        prediction = brain.predict(abs_data) # Dirá "Unknown" si no está entrenado
 
-            # B) Inyectar RAW (VERSIÓN NUCLEAR DEBUG)
-            # Imprimimos para ver qué está intentando procesar
-            print(f"[DEBUG RAW] Procesando {len(raw_data)} claves originales...")
-            
-            for k, v in raw_data.items():
-                # Lógica simplificada: Si no es 'target' y es un número, PA DENTRO.
-                if k != "target":
-                    # Forzamos que sea float para evitar problemas de tipos
-                    try:
-                        val_float = float(v)
-                        final_package[f"raw_{k}"] = val_float
-                        # print(f" -> Añadido: raw_{k}") # Descomenta si necesitas ver uno a uno
-                    except ValueError:
-                        pass # Si no es convertible a número, lo ignoramos
+        # 3. Preparar el PAQUETE COMPLETO para ThingsBoard
+        final_package = {}
 
-            # Añadir metadatos
-            final_package["target"] = CURRENT_LABEL
-            final_package["pc1"] = pc1
-            final_package["pc2"] = pc2
-            final_package["calibrated"] = is_calibrated 
+        # A) Datos Químicos (Absorbancia)
+        final_package.update(abs_data)
 
-            # DEBUG: Vemos las claves finales
-            keys_list = list(final_package.keys())
-            # Filtramos solo las raw para ver si están
-            raw_keys = [k for k in keys_list if "raw_" in k]
-            print(f"[DEBUG FINAL] Total Keys: {len(keys_list)} | Raw Keys insertadas: {len(raw_keys)}")
-            if len(raw_keys) > 0:
-                print(f"[DEBUG SAMPLE] Ejemplo: {raw_keys[0]}")
+        # B) Datos Físicos (Raw) - Con prefijo 'raw_'
+        for k, v in raw_data.items():
+            if k != "target" and isinstance(v, (int, float)):
+                final_package[f"raw_{k}"] = v
 
-            # 4. Enviar
-            save_to_influx(abs_data, is_absorbance=True)
-            client_tb.publish("v1/devices/me/telemetry", json.dumps(final_package))
-            
+        # C) Metadatos
+        final_package["target"] = CURRENT_LABEL
+        final_package["prediction"] = prediction
+        final_package["pc1"] = pc1
+        final_package["pc2"] = pc2
+        final_package["calibrated"] = is_calibrated
+
+        # 4. Enviar a Dashboard y Base de Datos
+        print(f"[ENVIO] Target: {CURRENT_LABEL} | Pred: {prediction} | Calibrado: {is_calibrated}")
+        
+        # Guardamos en influx (opcional separar en dos buckets, aquí simplificado)
+        save_to_influx(final_package, is_absorbance=True) 
+        
+        client_tb.publish("v1/devices/me/telemetry", json.dumps(final_package))
+
     except Exception as e:
-        print(f"Error pipeline CRITICO: {e}")
+        print(f"Error CRITICO en bucle principal: {e}")
 
 
 
