@@ -222,16 +222,31 @@ esp_err_t as7265x_set_integration_time(as7265x_handle_t *handle, uint8_t value) 
 }
 
 esp_err_t as7265x_set_bulb_current(as7265x_handle_t *handle, uint8_t current_code, bool enable) {
-    uint8_t led_cfg;
-    virtual_write(handle, VIRT_DEV_SEL, 0x00); 
-    if (virtual_read(handle, VIRT_LED_CONFIG, &led_cfg) != ESP_OK) return ESP_FAIL;
+    // Recorremos los 3 sensores: 0=Master, 1=Slave1, 2=Slave2
+    for (uint8_t dev = 0; dev < 3; dev++) {
+        
+        // 1. Seleccionamos el dispositivo (NIR, VIS o UV)
+        if (virtual_write(handle, VIRT_DEV_SEL, dev) != ESP_OK) return ESP_FAIL;
 
-    led_cfg &= ~(0b00111000);
-    if (enable) {
-        led_cfg |= (1 << 3); 
-        led_cfg |= (current_code << 4);
+        // 2. Leemos su configuración actual
+        uint8_t led_cfg;
+        if (virtual_read(handle, VIRT_LED_CONFIG, &led_cfg) != ESP_OK) return ESP_FAIL;
+
+        // 3. Modificamos los bits del LED
+        // Bit 3: Enable Bulb
+        // Bits 4-5: Corriente (12.5mA, 25mA, 50mA, 100mA)
+        led_cfg &= ~(0b00111000); // Limpiamos bits anteriores (3, 4 y 5)
+        
+        if (enable) {
+            led_cfg |= (1 << 3);            // Activamos Bit 3
+            led_cfg |= (current_code << 4); // Ponemos corriente en Bits 4-5
+        }
+
+        // 4. Escribimos la configuración de vuelta
+        if (virtual_write(handle, VIRT_LED_CONFIG, led_cfg) != ESP_OK) return ESP_FAIL;
     }
-    return virtual_write(handle, VIRT_LED_CONFIG, led_cfg);
+
+    return ESP_OK;
 }
 
 esp_err_t as7265x_set_indicator_led(as7265x_handle_t *handle, bool enable, uint8_t current_code) {

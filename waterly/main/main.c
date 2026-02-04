@@ -1,20 +1,35 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
-#include "driver/i2c.h" // El driver I2C se gestiona aquí
+#include "driver/i2c.h" 
 #include "wifi_connect.h"
-#include "ssd1306.h"
 #include "esp_task_wdt.h"
-
+#include "esp_flash.h"
 #include "mqtt_app.h"
-#include "app_controller.h" // <--- El nuevo cerebro
+#include "app_controller.h" 
+#include "nextion.h" 
 
 static const char *TAG = "MAIN";
 
-// Definición de pines I2C (Centralizada)
+// Definición de pines I2C (Solo para el sensor AS7265x)
 #define I2C_MASTER_SCL_IO           22
 #define I2C_MASTER_SDA_IO           21
 #define I2C_MASTER_NUM              I2C_NUM_0
 #define I2C_MASTER_FREQ_HZ          100000 
+
+// Función auxiliar para actualizar barra de carga
+void actualizar_carga(int porcentaje, const char* texto) {
+    char cmd[30];
+    
+    // 1. Actualizar texto
+    nextion_send_txt("t0", texto);
+    
+    // 2. Actualizar barra de progreso (j0)
+    snprintf(cmd, sizeof(cmd), "j0.val=%d", porcentaje);
+    nextion_send_cmd(cmd);
+    
+    // Pequeño delay para que el ojo humano vea el cambio
+    vTaskDelay(pdMS_TO_TICKS(50));
+}
 
 void app_main(void)
 {
@@ -28,8 +43,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Arrancando Waterly Modular...");
 
-    // 2. INSTALAR I2C (GLOBAL)
-    // Se hace aquí una vez para evitar conflictos entre pantalla y sensor
+    // 2. INSTALAR I2C (GLOBAL para el sensor)
     i2c_config_t conf = {
         .mode = I2C_MODE_MASTER,
         .sda_io_num = I2C_MASTER_SDA_IO,
@@ -42,42 +56,87 @@ void app_main(void)
     i2c_param_config(I2C_MASTER_NUM, &conf);
     ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0));
 
-    // 3. INICIAR PANTALLA
-    ssd1306_init(I2C_MASTER_NUM);
-    ssd1306_clear();
-    ssd1306_print(0, 0, "System Init...");
+    // 3. INICIAR PANTALLA NEXTION
+    if (nextion_init() == ESP_OK) {
+        ESP_LOGI(TAG, "Nextion UART: OK");
+        
+        // --- EFECTO 1: AMANECER (FADE-IN) MEJORADO ---
+        
+        // 1. Apagado total inicial y carga de página
+        nextion_send_cmd("dim=0"); 
+        nextion_send_cmd("page 0");
+        
+        // Esperamos medio segundo en negro para asegurar que la pantalla procesa el "page 0"
+        // antes de empezar a subir el brillo. Esto evita parpadeos iniciales.
+        vTaskDelay(pdMS_TO_TICKS(500)); 
+
+        // 2. Subida lenta y suave (De 0 a 100 de 1 en 1)
+        // Total tiempo: 100 pasos * 25ms = 2500ms (2.5 segundos)
+        ESP_LOGI(TAG, "Iniciando Fade-In...");
+        for(int i=0; i<=100; i++) {
+            char dim_cmd[16];
+            snprintf(dim_cmd, sizeof(dim_cmd), "dim=%d", i);
+            nextion_send_cmd(dim_cmd);
+            
+            // 25ms por paso da una sensación muy fluida
+            vTaskDelay(pdMS_TO_TICKS(25)); 
+        }
+
+        // Empezamos la barra al 10%
+        actualizar_carga(10, "System Init...");
+        
+    } else {
+        ESP_LOGE(TAG, "Nextion UART: FAIL");
+    }
 
     // 4. INICIAR EL CEREBRO (APP CONTROLLER)
-    // Esto crea la cola y lanza la tarea FSM en segundo plano
+    actualizar_carga(30, "Init Controller...");
     if (app_controller_init() == ESP_OK) {
         ESP_LOGI(TAG, "App Controller: OK");
     } else {
         ESP_LOGE(TAG, "App Controller: FAIL");
     }
 
+    // Variable para guardar el tamaño de la flash
+    uint32_t flash_size;
+    actualizar_carga(50, "Checking Flash...");
+    if (esp_flash_get_size(NULL, &flash_size) == ESP_OK) {
+        ESP_LOGI("SYSTEM", "Tamaño de Flash: %lu MB", flash_size / (1024 * 1024));
+    } else {
+        ESP_LOGE("SYSTEM", "No se pudo leer el tamaño de la flash");
+    }
+
     // 5. CONECTAR WIFI Y MQTT
+    actualizar_carga(60, "Connecting WiFi...");
+    
     if (wifi_connect_init() == ESP_OK) {
-        ssd1306_print(2, 0, "WiFi OK");
+        // Feedback positivo
+        actualizar_carga(80, "WiFi Connected!");
         
         ESP_LOGI(TAG, "Iniciando MQTT...");
         mqtt_app_start();
         
-        // 6. SINCRONIZACIÓN (Esperar órdenes del servidor)
-        ssd1306_print(4, 0, "Sync MQTT...");
+        // 6. SINCRONIZACIÓN
+        actualizar_carga(90, "Sync MQTT...");
         ESP_LOGI(TAG, "Esperando 5s para recibir configuración MQTT...");
         
-        // Durante este delay, si MQTT recibe algo, enviará un evento al controlador
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        // Durante este delay, llenamos la barra lentamente hasta el final
+        for(int i=90; i<=100; i++) {
+             char j_cmd[20];
+             snprintf(j_cmd, sizeof(j_cmd), "j0.val=%d", i);
+             nextion_send_cmd(j_cmd);
+             vTaskDelay(pdMS_TO_TICKS(500)); // Repartimos los 5s aquí
+        }
 
         // 7. DECISIÓN POR DEFECTO
-        // Si no ha llegado ninguna orden de "Dormir" (el estado sigue en IDLE),
-        // arrancamos el modo entrenamiento por defecto.
-        // Nota: app_controller gestiona internamente si cambia de estado.
         ESP_LOGW(TAG, "Enviando señal de arranque por defecto...");
+        
+        // ¡Listo! Al mandar GO_IDLE, el app_controller cambiará a la Page 1 (Menú)
         app_controller_send_event(APP_EVENT_GO_IDLE);
 
     } else {
-        ssd1306_print(2, 0, "Error WiFi");
+        actualizar_carga(0, "Error WiFi"); // Barra a 0 en rojo si pudieras cambiar color
+        nextion_send_txt("t0", "Fallo Critico WiFi");
         ESP_LOGE(TAG, "Fallo crítico WiFi");
     }
 
