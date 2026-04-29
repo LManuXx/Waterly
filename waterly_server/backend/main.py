@@ -1,12 +1,21 @@
 import paho.mqtt.client as mqtt
 import json
 import time
+import threading
 import os
 import requests
 from fastapi import FastAPI
 from influxdb_client import InfluxDBClient, Point
-from influxdb_client.client.write_api import SYNCHRONOUS
+from influxdb_client.client.write_api import ASYNCHRONOUS
 from brain import SpectralBrain
+from enum import Enum
+
+class SystemState(Enum):
+    IDLE = "IDLE"
+    CALIBRATION = "CALIBRATION"
+    FREE_MEASURE = "FREE_MEASURE"
+    TRAINING = "TRAINING"
+    ANALYSIS = "ANALYSIS"
 
 # --- CONFIGURACION ---
 TB_ACCESS_TOKEN = "x35f744geqt5lgsnlwsk" 
@@ -24,20 +33,19 @@ INFLUX_ORG = "waterly_org"
 INFLUX_BUCKET = "sensor_data"
 
 # --- MEMORIA DE LA API ---
-CURRENT_LABEL = "Unknown" 
-
-CALIBRATION_STATE = {
-    "active": False,
+CURRENT_STATE = SystemState.IDLE
+BURST_CONTEXT = {
     "target_count": 0,
-    "current_buffer": []
+    "current_buffer": [],
+    "label": "Unknown"
 }
 
 brain = SpectralBrain()
 
 try:
     client_influx = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-    write_api = client_influx.write_api(write_options=SYNCHRONOUS)
-    print("Conexion con InfluxDB lista")
+    write_api = client_influx.write_api(write_options=ASYNCHRONOUS)
+    print("Conexion con InfluxDB lista (modo asíncrono)")
 except Exception as e:
     print(f"Fallo al conectar con InfluxDB: {e}")
 
@@ -49,27 +57,16 @@ client_tb.username_pw_set(TB_ACCESS_TOKEN)
 app = FastAPI()
 
 def clean_and_validate_data(raw_json):
-    """
-    MODIFICADO: Ahora es dinámico. Acepta cualquier clave numérica
-    que envíe el ESP32 (A_410nm, G_560nm, etc.)
-    """
     try:
         data = json.loads(raw_json)
         clean_data = {}
         
-        # Recorremos TODAS las claves que vienen en el JSON
         for key, val in data.items():
-            # Si el valor es un número (int o float), lo guardamos
             if isinstance(val, (int, float)):
-                # Filtro de seguridad: ignorar valores corruptos extremos
                 if -1000 <= val <= 100000: 
                     clean_data[key] = val
         
-        # Inyectamos la etiqueta actual
-        clean_data["target"] = CURRENT_LABEL
-        
-        # Si hemos recuperado al menos 1 dato numérico, es válido
-        if len(clean_data) > 1: # >1 porque "target" siempre está
+        if len(clean_data) > 0: 
             return clean_data
         
         return None
@@ -81,39 +78,28 @@ def clean_and_validate_data(raw_json):
 def save_to_influx(data, is_absorbance=False):
     try:
         if not data: return
-        
-        # Marcamos si son datos Crudos (Raw) o Absorbancia (Abs)
         measurement_name = "water_quality_abs" if is_absorbance else "water_quality_raw"
-
         p = Point(measurement_name) \
             .tag("device", "ESP32_01") \
-            .tag("component", CURRENT_LABEL)
+            .tag("state", CURRENT_STATE.value)
 
         for key, val in data.items():
-            # Guardamos las coordenadas PCA y los espectros
-            if key in ["pc1", "pc2"] or "_nm" in key:
+            if key in ["pc1", "pc2", "pred_deviation"] or "_nm" in key:
                 p.field(key, float(val))
         
         write_api.write(bucket=INFLUX_BUCKET, org=INFLUX_ORG, record=p)
-        print(f"InfluxDB ({measurement_name}): Guardado.")
         
     except Exception as e:
         print(f"Error InfluxDB: {e}")
 
 def autoconfig_thingsboard():
-    # ... (Esta función NO cambia, es correcta) ...
     print("[AUTO-CONFIG] Verificando dispositivo en ThingsBoard...")
     base_url = f"http://{TB_HOST}:9090"
-    
     try:
-        # 1. Login
         resp = requests.post(f"{base_url}/api/auth/login", json={"username": TB_ADMIN_USER, "password": TB_ADMIN_PASS})
-        if resp.status_code != 200:
-            return False 
-            
+        if resp.status_code != 200: return False 
         headers = {"X-Authorization": f"Bearer {resp.json()['token']}"}
         
-        # 2. Buscar/Crear Dispositivo
         device_name = "Waterly_ESP32"
         check_url = f"{base_url}/api/tenant/devices?deviceName={device_name}"
         resp = requests.get(check_url, headers=headers)
@@ -130,23 +116,17 @@ def autoconfig_thingsboard():
                 device_id = resp.json()["id"]["id"]
                 print(f"Dispositivo creado con exito.")
             else:
-                print(f"Error creando dispositivo: {resp.text}")
                 return True 
 
-        # 3. Forzar Token
         if device_id:
             get_url = f"{base_url}/api/device/{device_id}/credentials"
             save_url = f"{base_url}/api/device/credentials"
-
             resp = requests.get(get_url, headers=headers)
-            
             if resp.status_code == 200:
                 creds_data = resp.json()
                 current_token = creds_data.get("credentialsId")
-                
                 if current_token != TB_ACCESS_TOKEN:
                     print(f"Actualizando token a '{TB_ACCESS_TOKEN}'...")
-                    
                     payload = {
                         "id": creds_data.get("id"), 
                         "createdTime": creds_data.get("createdTime"),
@@ -155,193 +135,257 @@ def autoconfig_thingsboard():
                         "credentialsId": TB_ACCESS_TOKEN,
                         "credentialsValue": None
                     }
-
                     save_resp = requests.post(save_url, json=payload, headers=headers)
-                    
-                    if save_resp.status_code == 200:
-                        print("Token actualizado con EXITO")
-                    else:
-                        print(f"FALLO al guardar token: {save_resp.status_code}")
-                else:
-                    print("El Token ya es correcto.")
             return True
-            
     except Exception as e:
         return False
-    
     return False
 
-def on_mosquitto_message(client, userdata, msg):
-    global CALIBRATION_STATE
-    
-    try:
-        raw_payload = msg.payload.decode()
-        # clean_and_validate debe dejar pasar los datos crudos tal cual
-        raw_data = clean_and_validate_data(raw_payload)
-        
-        if not raw_data: return
-
-        # --- CASO 1: ESTAMOS CALIBRANDO (Creando nuevo modelo base) ---
-        if CALIBRATION_STATE["active"]:
-            # 1. Acumulamos la muestra cruda
-            CALIBRATION_STATE["current_buffer"].append(raw_data)
-            
-            count = len(CALIBRATION_STATE["current_buffer"])
-            target = CALIBRATION_STATE["target_count"]
-            
-            print(f"[CALIBRANDO] Muestra {count}/{target} recibida.")
-            
-            if count < target:
-                # Ping-Pong: Pedimos la siguiente
-                time.sleep(0.1)
-                client_mosquitto.publish("waterly/comandos", json.dumps({"mode": "single"}), retain=False)
-            else:
-                # Fin del bucle: Mandamos todo al cerebro para que filtre y promedie
-                print("[CALIBRANDO] Finalizado. Enviando al cerebro...")
-                success = brain.calibrate(CALIBRATION_STATE["current_buffer"])
-                
-                if success:
-                    print("--> CALIBRACIÓN GUARDADA CORRECTAMENTE.")
-                else:
-                    print("--> FALLO EN CALIBRACIÓN (Muestras inválidas).")
-                
-                # Resetear estado y VOLVER AL FLUJO NORMAL
-                CALIBRATION_STATE["active"] = False
-                CALIBRATION_STATE["current_buffer"] = []
-            
-            # IMPORTANTE: Durante la calibración NO enviamos nada a ThingsBoard
-            return 
-
-        # --- CASO 2: MEDICIÓN NORMAL (Usando el modelo actual) ---
-        
-        # 1. Calcular Absorbancia basada en la calibración guardada
-        abs_data, is_calibrated = brain.get_absorbance(raw_data)
-        
-        # 2. Consultar a la IA (Lo implementaremos a fondo luego, ahora solo coordenadas)
-        pc1, pc2 = brain.get_coords(abs_data)
-        prediction = brain.predict(abs_data) # Dirá "Unknown" si no está entrenado
-
-        # 3. Preparar el PAQUETE COMPLETO para ThingsBoard
-        final_package = {}
-
-        # A) Datos Químicos (Absorbancia)
-        final_package.update(abs_data)
-
-        # B) Datos Físicos (Raw) - Con prefijo 'raw_'
-        for k, v in raw_data.items():
-            if k != "target" and isinstance(v, (int, float)):
-                final_package[f"raw_{k}"] = v
-
-        # C) Metadatos
-        final_package["target"] = CURRENT_LABEL
-        final_package["prediction"] = prediction
-        final_package["pc1"] = pc1
-        final_package["pc2"] = pc2
-        final_package["calibrated"] = is_calibrated
-
-        # 4. Enviar a Dashboard y Base de Datos
-        print(f"[ENVIO] Target: {CURRENT_LABEL} | Pred: {prediction} | Calibrado: {is_calibrated}")
-        
-        # Guardamos en influx (opcional separar en dos buckets, aquí simplificado)
-        save_to_influx(final_package, is_absorbance=True) 
-        
-        client_tb.publish("v1/devices/me/telemetry", json.dumps(final_package))
-
-    except Exception as e:
-        print(f"Error CRITICO en bucle principal: {e}")
-
-
-
 def calculate_average_spectrum(buffer):
-    """ Toma una lista de N mediciones y devuelve un solo diccionario promediado """
     if not buffer: return None
-    
     first_sample = buffer[0]
     averaged_data = {}
-    
-    # Recorremos las claves (A_410nm, B_435nm, etc.)
     for key in first_sample.keys():
-        # Solo promediamos los números
         if isinstance(first_sample[key], (int, float)):
             total = sum(d.get(key, 0) for d in buffer)
             averaged_data[key] = round(total / len(buffer), 2)
-            
     return averaged_data
+
+def send_telemetry(raw_data, abs_data=None, is_calibrated=False, prediction_status=None, prediction_value=None):
+    final_package = {}
+    
+    # 1. Metadatos de estado actual
+    final_package["system_state"] = CURRENT_STATE.value
+    final_package["calibrated"] = is_calibrated
+    
+    if prediction_status:
+        final_package["prediction_status"] = str(prediction_status)
+    if prediction_value is not None:
+        final_package["pred_deviation"] = prediction_value
+        
+    # 2. Datos Raw (Siempre se envían)
+    for k, v in raw_data.items():
+        if isinstance(v, (int, float)):
+            final_package[f"raw_{k}"] = v
+
+    # 3. Datos de Absorbancia (si están disponibles)
+    if abs_data:
+        final_package.update(abs_data)
+
+    save_to_influx(final_package, is_absorbance=(abs_data is not None)) 
+    client_tb.publish("v1/devices/me/telemetry", json.dumps(final_package))
+
+
+def on_mosquitto_message(client, userdata, msg):
+    global CURRENT_STATE, BURST_CONTEXT
+    
+    try:
+        raw_payload = msg.payload.decode()
+        raw_data = clean_and_validate_data(raw_payload)
+        if not raw_data: return
+
+        # FASE 1: SIEMPRE intentar calcular absorbancia
+        abs_data, is_calibrated, snv_data = brain.get_absorbance(raw_data)
+        
+        # FASE 2: MÁQUINA DE ESTADOS
+        
+        # === ESTADO IDLE: Ignorar datos silenciosamente para no saturar ===
+        if CURRENT_STATE == SystemState.IDLE:
+            return
+
+        # === ESTADO LECTURA LIBRE ===
+        elif CURRENT_STATE == SystemState.FREE_MEASURE:
+            prediction_status = "Monitorizando"
+            prediction_value = None
+            if is_calibrated and brain.is_trained:
+                prediction_value = brain.predict(snv_data)
+            elif not is_calibrated:
+                prediction_status = "Falta Calibrar"
+            elif not brain.is_trained:
+                prediction_status = "Falta Entrenar"
+                
+            send_telemetry(raw_data, abs_data, is_calibrated, prediction_status, prediction_value)
+
+        # === ESTADOS DE RÁFAGA (BURST) ===
+        elif CURRENT_STATE in [SystemState.CALIBRATION, SystemState.TRAINING, SystemState.ANALYSIS]:
+            # Ignorar datos viejos de la cola MQTT: si ya tenemos suficientes, no acumular más
+            if len(BURST_CONTEXT["current_buffer"]) >= BURST_CONTEXT["target_count"]:
+                return
+                
+            BURST_CONTEXT["current_buffer"].append(raw_data)
+            count = len(BURST_CONTEXT["current_buffer"])
+            target = BURST_CONTEXT["target_count"]
+            
+            print(f"[{CURRENT_STATE.value}] Recibiendo muestra {count}/{target}...")
+            # Solo publicar progreso a TB (sin InfluxDB) para mantener velocidad
+            client_tb.publish("v1/devices/me/telemetry", json.dumps({
+                "prediction_status": f"{CURRENT_STATE.value} ({count}/{target})",
+                "system_state": CURRENT_STATE.value
+            }))
+            
+            # Pide la siguiente muestra o finaliza
+            if count < target:
+                # Timer de 0.3s: el ESP32 tarda ~0.1s en medir, 0.3s da margen de red
+                def pedir_siguiente():
+                    client_mosquitto.publish("waterly/comandos", json.dumps({"mode": "single"}), retain=False)
+                threading.Timer(0.3, pedir_siguiente).start()
+            else:
+                print(f"[{CURRENT_STATE.value}] Burst completado. Procesando...")
+                
+                if CURRENT_STATE == SystemState.CALIBRATION:
+                    success = brain.calibrate(BURST_CONTEXT["current_buffer"])
+                    status = "Calibracion Exitosa" if success else "Error en Calibracion"
+                    print(f"--> {status}")
+                    send_telemetry(raw_data, prediction_status=status)
+                    
+                elif CURRENT_STATE == SystemState.TRAINING:
+                    if is_calibrated:
+                        avg_raw = calculate_average_spectrum(BURST_CONTEXT["current_buffer"])
+                        _, _, avg_snv = brain.get_absorbance(avg_raw)
+                        
+                        if avg_snv is None:
+                            print("--> Error: No se pudo calcular absorbancia del promedio.")
+                            send_telemetry(avg_raw, abs_data, is_calibrated, prediction_status="Error: Absorbancia fallida")
+                        else:
+                            try:
+                                num_val = float(BURST_CONTEXT["label"])
+                            except ValueError:
+                                num_val = 0.0
+                                print("--> Aviso: Etiqueta no numérica. Usando 0.0 (válido para modo DEVIATION).")
+                                
+                            brain.add_training_sample(avg_snv, num_val)
+                            print(f"--> Muestra {num_val} guardada. Dataset total: {len(brain.dataset_X)}")
+                            brain.save_brain()
+                            send_telemetry(avg_raw, abs_data, is_calibrated, prediction_status=f"Muestra Guardada ({len(brain.dataset_X)} en memoria)")
+                    else:
+                        print("--> Error: Falta calibrar.")
+                        send_telemetry(raw_data, prediction_status="Error: Falta Calibrar")
+
+                elif CURRENT_STATE == SystemState.ANALYSIS:
+                    if is_calibrated and brain.is_trained:
+                        avg_raw = calculate_average_spectrum(BURST_CONTEXT["current_buffer"])
+                        _, _, avg_snv = brain.get_absorbance(avg_raw)
+                        pred = brain.predict(avg_snv)
+                        print(f"--> Analisis: {pred}")
+                        send_telemetry(avg_raw, abs_data, is_calibrated, prediction_status="Analisis Finalizado", prediction_value=pred)
+                    else:
+                        print("--> Error: Modelo no listo.")
+                        send_telemetry(raw_data, abs_data, is_calibrated, prediction_status="Falta modelo o calibracion")
+                
+                # Volver a IDLE al terminar
+                CURRENT_STATE = SystemState.IDLE
+                BURST_CONTEXT["current_buffer"] = []
+                client_mosquitto.publish("waterly/comandos", json.dumps({"mode": "idle"}), retain=True)
+
+    except Exception as e:
+        print(f"Error en bucle principal: {e}")
 
 # --- PUENTE MQTT (NUBE -> ESP32) ---
 def on_tb_message(client, userdata, msg):
-    # ... (Esta función NO cambia, es correcta para recibir comandos) ...
-    global CURRENT_LABEL
+    global CURRENT_STATE, BURST_CONTEXT
     
     try:
         data = json.loads(msg.payload)
         method = data.get("method")
         params = data.get("params")
         
-        esp_payload = {}
+        esp_payload = None
         should_retain = False 
         
-        if method == "setTarget":
-            CURRENT_LABEL = str(params)
-            print(f"[API] Etiqueta cambiada a: {CURRENT_LABEL}")
-            return 
+        print(f"[RPC] Recibido: {method} | params: {params}")
 
-        elif method == "setIdle":
+        if method == "setIdle":
+            CURRENT_STATE = SystemState.IDLE
             esp_payload = {"mode": "idle"}
             should_retain = True 
+            client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": "Forzado a Reposo"}))
             
-        elif method == "startTraining":
+        elif method == "startFreeMeasure":
+            CURRENT_STATE = SystemState.FREE_MEASURE
             esp_payload = {"mode": "training"}
             should_retain = True
-            
-        elif method == "deepSleep":
-            esp_payload = {"mode": "sleep"}
-            should_retain = True
-            
-        elif method == "singleMeasure":
-            esp_payload = {"mode": "single"}
-            should_retain = False 
-            
-        elif method == "startOTA":
-            esp_payload = {"update": True}
-            should_retain = False 
 
         elif method == "calibrate":
-            # Leemos el número de muestras (si viene vacío, por defecto 10)
-            samples = int(params) if params else 10
+            samples = int(params) if params else 5
+            CURRENT_STATE = SystemState.CALIBRATION
+            BURST_CONTEXT = {"target_count": samples, "current_buffer": [], "label": "Unknown"}
+            esp_payload = {"mode": "single"}
             
-            print(f"[CALIBRACIÓN] Iniciando secuencia de {samples} muestras...")
+        elif method == "startTraining":
+            # Permite {"label": "5.0", "samples": 5} o solo "5.0"
+            label = "0.0"
+            samples = 5
+            if isinstance(params, dict):
+                label = str(params.get("label", "0.0"))
+                samples = int(params.get("samples", 5))
+            else:
+                label = str(params)
+                
+            CURRENT_STATE = SystemState.TRAINING
+            BURST_CONTEXT = {"target_count": samples, "current_buffer": [], "label": label}
+            esp_payload = {"mode": "single"}
+
+        elif method == "startAnalysis":
+            samples = int(params) if params else 5
+            CURRENT_STATE = SystemState.ANALYSIS
+            BURST_CONTEXT = {"target_count": samples, "current_buffer": [], "label": "Unknown"}
+            esp_payload = {"mode": "single"}
             
-            # Preparamos el estado
-            CALIBRATION_STATE["active"] = True
-            CALIBRATION_STATE["target_count"] = samples
-            CALIBRATION_STATE["current_buffer"] = []
+        elif method == "trainModel":
+            # Esperar a que termine cualquier burst en curso
+            if CURRENT_STATE in [SystemState.CALIBRATION, SystemState.TRAINING, SystemState.ANALYSIS]:
+                client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": "Esperando fin de burst..."}))
+                print("[CMD] Esperando a que termine el burst en curso...")
+                for _ in range(60):  # max 30 segundos
+                    time.sleep(0.5)
+                    if CURRENT_STATE == SystemState.IDLE:
+                        break
             
-            # Lanzamos la PRIMERA petición
-            client_mosquitto.publish("waterly/comandos", json.dumps({"mode": "single"}), retain=False)
-        
+            n_samples = len(brain.dataset_X)
+            print(f"[CMD] Entrenando modelo ({brain.model_type}) con {n_samples} muestras...")
+            success = brain.train_model()
+            if success:
+                status_msg = f"Modelo Entrenado OK ({n_samples} muestras)"
+            else:
+                status_msg = f"Error entrenando. Muestras en memoria: {n_samples}"
+            print(f"[CMD] ML Resultado: {status_msg}")
+            client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": status_msg}))
+            return
+
+        elif method == "resetModel":
+            brain.reset_model()
+            client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": "Modelo Borrado", "pred_deviation": 0.0}))
+            return
+
+        elif method == "setModeDeviation":
+            brain.model_type = "DEVIATION"
+            print("[CMD] Modo cambiado a: DEVIATION")
+            client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": "Modo: DEVIATION"}))
+            return
+
+        elif method == "setModePLSR":
+            brain.model_type = "PLSR"
+            print("[CMD] Modo cambiado a: PLSR")
+            client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": "Modo: PLSR"}))
+            return
+
         if esp_payload:
             client_mosquitto.publish("waterly/comandos", json.dumps(esp_payload), retain=should_retain)
-            print(f"[CMD] Enviado a ESP32: {method} | Retain: {should_retain}")
             
     except Exception as e:
-        print(f"Error gestionando RPC: {e}")
+        print(f"Error RPC: {e}")
 
-waiting_for_calibration = False
 
-# --- ARRANQUE ---
 @app.on_event("startup")
 def start_bridge():
-    print(">>> INICIANDO WATERLY BRAIN v2.2 (Full Spectrum Support) <<<")
+    print(">>> INICIANDO WATERLY API - STATE MACHINE v3.0 <<<")
     
-    # ... (Resto del arranque igual) ...
     tb_ready = False
     for i in range(30): 
         if autoconfig_thingsboard():
             print("ThingsBoard configurado.")
             tb_ready = True
             break
-        print(f"Intento {i+1}/30: Esperando a ThingsBoard...")
         time.sleep(5)
 
     try:
@@ -349,15 +393,13 @@ def start_bridge():
         client_mosquitto.subscribe("waterly/datos")
         client_mosquitto.on_message = on_mosquitto_message
         client_mosquitto.loop_start() 
-        print("Mosquitto Conectado")
         
         client_tb.connect(TB_HOST, 1883, 60) 
         client_tb.subscribe("v1/devices/me/rpc/request/+")
         client_tb.on_message = on_tb_message
         client_tb.loop_start() 
-        print("ThingsBoard RPC Conectado")
     except Exception as e:
         print(f"Error MQTT: {e}")
 
 @app.get("/")
-def read_root(): return {"status": "Online", "current_target": CURRENT_LABEL}
+def read_root(): return {"status": "Online", "state": CURRENT_STATE.value}

@@ -104,7 +104,7 @@ void mqtt_app_start(void) {
     } else {
         // FALLBACK: Si falla, usamos la IP fija de emergencia (Cámbiala a la tuya actual)
         ESP_LOGE(TAG, "Fallo autodescubrimiento. Usando IP fija de emergencia.");
-        snprintf(mqtt_uri_buffer, sizeof(mqtt_uri_buffer), "mqtt://192.168.1.25:1883"); 
+        snprintf(mqtt_uri_buffer, sizeof(mqtt_uri_buffer), "mqtt://192.168.50.136:1883");
     }
 
     ESP_LOGI(TAG, "Conectando al Broker: %s", mqtt_uri_buffer);

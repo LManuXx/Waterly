@@ -7,6 +7,7 @@
 #include <wifi_provisioning/scheme_ble.h> 
 
 #include "wifi_connect.h"
+#include "nextion.h"
 
 static const char *TAG = "WIFI_PROV";
 static EventGroupHandle_t s_wifi_event_group;
@@ -32,10 +33,14 @@ static void event_handler(void* arg, esp_event_base_t event_base,
             esp_wifi_connect();
             s_retry_num++;
             ESP_LOGW(TAG, "Reintentando conexión al AP... (%d/%d)", s_retry_num, MAXIMUM_RETRY);
+            char retry_msg[20];
+            snprintf(retry_msg, sizeof(retry_msg), "WiFi %d/%d", s_retry_num, MAXIMUM_RETRY);
+            nextion_send_txt("page0.t2", retry_msg);
         } else {
             // Se acabaron los intentos. Asumimos que el WiFi cambió o es incorrecto.
             ESP_LOGE(TAG, "Fallo crítico: No se puede conectar al WiFi guardado.");
             ESP_LOGE(TAG, ">>> BORRANDO CREDENCIALES Y REINICIANDO EN MODO CONFIGURACION <<<");
+            nextion_send_txt("page0.t2", "Usa BLE config");
             
             // Re-inicializamos el manager brevemente para poder ejecutar el comando de borrado
             wifi_prov_mgr_config_t config = {
@@ -56,6 +61,9 @@ static void event_handler(void* arg, esp_event_base_t event_base,
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "¡Conectado! IP:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0; // Reseteamos contador por si se desconecta en el futuro
+        char ip_str[20];
+        snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&event->ip_info.ip));
+        nextion_send_txt("page0.t2", ip_str);
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
@@ -95,6 +103,7 @@ esp_err_t wifi_connect_init(void)
 
     if (provisioned) {
         ESP_LOGI(TAG, "Credenciales encontradas. Intentando conectar...");
+        nextion_send_txt("page0.t2", "Conectando...");
         wifi_prov_mgr_deinit(); // Liberamos RAM del Bluetooth
         esp_wifi_set_mode(WIFI_MODE_STA);
         esp_wifi_start();
@@ -110,6 +119,7 @@ esp_err_t wifi_connect_init(void)
         wifi_prov_mgr_start_provisioning(security, pop, service_name, NULL);
         
         ESP_LOGW(TAG, "ESTADO: Esperando configuración en App móvil (EspBleProv)");
+        nextion_send_txt("page0.t2", "Config BLE...");
     }
 
     xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);

@@ -1,190 +1,243 @@
 import numpy as np
 import joblib
 import os
-from sklearn.decomposition import PCA
+from sklearn.cross_decomposition import PLSRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import r2_score
 
 MODEL_FILE = "waterly_model.pkl"
 
 class SpectralBrain:
     def __init__(self):
-        # --- MEMORIA (Estado) ---
-        self.baseline = None  # La "Línea Base" de agua limpia
+        # --- ESTADO FÍSICO ---
+        self.baseline = None  # I0 (Agua limpia)
         
-        # --- IA (Para el futuro) ---
-        self.pca = PCA(n_components=2)
-        self.scaler = StandardScaler()
-        self.classifier = KNeighborsClassifier(n_neighbors=3)
+        # --- ESTADO IA ---
+        self.dataset_X = []   # Muestras de entrenamiento (18 canales SNV)
+        self.dataset_y = []   # Valores numéricos (Desviación/Concentración)
         
-        self.X_train = [] 
-        self.y_train = [] 
+        # Pipeline de IA
+        self.scaler = None
+        self.model = None
+        self.model_type = "DEVIATION" # "DEVIATION" o "PLSR"
+        
         self.is_trained = False
         
-        # Cargar memoria al iniciar
+        # Índices de bandas UV e IR en self._get_wavelengths()
+        # A_410(0), J_705(9), K_900(10), L_940(11), T_730(14), U_760(15), V_810(16), W_860(17)
+        self.uv_ir_indices = [0, 9, 10, 11, 14, 15, 16, 17]
+        
         self.load_brain()
 
-    def calibrate(self, raw_buffer):
-        """ 
-        Toma una lista de muestras crudas, descarta las malas y 
-        crea una nueva Línea Base (Sustituye a la anterior).
-        """
-        print(f"[BRAIN] Procesando calibración con {len(raw_buffer)} muestras...")
-        
-        # 1. FILTRADO: Descartar muestras defectuosas
-        clean_samples = self._filter_calibration_samples(raw_buffer)
-        
-        if not clean_samples:
-            print("[BRAIN] ERROR: Ninguna muestra válida para calibrar.")
-            return False
+    def reset_model(self):
+        """ Limpia todas las muestras y el modelo actual """
+        self.dataset_X = []
+        self.dataset_y = []
+        self.scaler = None
+        self.model = None
+        self.is_trained = False
+        self.save_brain()
+        print("[BRAIN] Modelo reiniciado. Memoria de IA limpia.")
 
-        # 2. PROMEDIO: Calcular la media de las muestras buenas
-        # Convertimos lista de dicts a matriz numpy para promediar fácil
-        matrix = []
-        for sample in clean_samples:
-            matrix.append(self._extract_spectrum(sample))
-            
-        avg_spectrum = np.mean(matrix, axis=0)
+    # ==========================================
+    # 1. FÍSICA Y ÓPTICA (Calibración)
+    # ==========================================
+    def calibrate(self, raw_buffer):
+        """ Paso 1: Establecer el Cero (I0) """
+        print(f"[BRAIN] Calibrando con {len(raw_buffer)} muestras...")
         
-        # 3. SUSTITUCIÓN: Reemplazamos el modelo anterior
-        self.baseline = np.array(avg_spectrum)
-        print(f"[BRAIN] ¡Calibración Exitosa! Nueva Baseline (Media): {np.mean(self.baseline):.1f}")
+        # Filtramos basura
+        valid = [s for s in raw_buffer if self._is_valid_sample(s)]
+        if not valid: return False
         
-        # 4. PERSISTENCIA: Guardamos en disco inmediatamente
+        # Promediamos
+        matrix = [self._extract_spectrum(s) for s in valid]
+        self.baseline = np.mean(matrix, axis=0)
+        
+        print(f"[BRAIN] Baseline fijada. Media: {np.mean(self.baseline):.1f}")
         self.save_brain()
         return True
 
     def get_absorbance(self, raw_data):
-        """ Calcula Absorbancia usando la Baseline actual """
-        if self.baseline is None:
-            print("[BRAIN] Aviso: Intentando medir sin calibración previa.")
-            return {}, False
+        """ Calcula Absorbancia y SNV """
+        if self.baseline is None: return {}, False, None
 
         spectrum = self._extract_spectrum(raw_data)
-        if spectrum is None:
-            return {}, False
+        if spectrum is None: return {}, False, None
 
         # Evitar división por cero
-        safe_baseline = np.where(self.baseline == 0, 1, self.baseline)
+        safe_base = np.where(self.baseline == 0, 1, self.baseline)
         
-        # Transmitancia y Absorbancia
-        transmission = np.array(spectrum) / safe_baseline
-        transmission = np.clip(transmission, 1e-6, 2.0) # Evita infinitos
-        absorbance = -np.log10(transmission)
+        # Transmitancia
+        trans = np.array(spectrum) / safe_base
+        trans = np.clip(trans, 1e-6, 10.0)
         
-        # Limpieza visual (Negativos a cero)
-        absorbance = np.maximum(absorbance, 0)
+        # Absorbancia
+        abs_raw = -np.log10(trans)
         
-        # Empaquetar con nombres de canales
+        # PREPROCESADO SNV 
+        mean = np.mean(abs_raw)
+        std = np.std(abs_raw)
+        if std == 0: std = 1
+        abs_snv = (abs_raw - mean) / std
+        
+        # Empaquetamos
         abs_dict = {}
         wavelengths = self._get_wavelengths()
         for i, wl in enumerate(wavelengths):
-            abs_dict[wl] = round(float(absorbance[i]), 4)
+            # Formato: NombreDeBanda_abs para claridad en ThingsBoard
+            abs_dict[f"{wl}_abs"] = round(float(abs_raw[i]), 4)
             
-        return abs_dict, True
+        return abs_dict, True, abs_snv
 
-    def _filter_calibration_samples(self, buffer):
-        """ Elimina muestras con valores negativos, ceros o saturación """
-        valid_buffer = []
-        for sample in buffer:
-            vals = self._extract_spectrum(sample)
-            if vals is None: continue
-            
-            # Criterios de descarte:
-            # 1. Algún canal negativo (Error sensor)
-            # 2. Algún canal es 0 (Led apagado/Error)
-            # 3. Algún canal > 60000 (Saturación de luz)
-            if np.any(np.array(vals) <= 0) or np.any(np.array(vals) > 60000):
-                print("[BRAIN] Muestra descartada (Valores fuera de rango)")
-                continue
-            
-            valid_buffer.append(sample)
-            
-        print(f"[BRAIN] Muestras válidas: {len(valid_buffer)} de {len(buffer)}")
-        return valid_buffer
-
-    # --- FUNCIONES AUXILIARES Y PERSISTENCIA (IA) ---
+    # ==========================================
+    # 2. INTELIGENCIA ARTIFICIAL (Regresión / Desviación)
+    # ==========================================
     
-    # Mantenemos las funciones de IA (teach, predict, get_coords) igual que antes
-    # pero simplificadas aquí para centrarme en tu petición de calibración.
-    # Cuando implementemos la predicción luego, las usaremos.
-    
-    def get_coords(self, abs_data):
-        # Retorna 0,0 si no hay IA entrenada, o las coords si la hay
-        if not self.is_trained: return 0.0, 0.0
-        try:
-            feats = self.scaler.transform([list(abs_data.values())])
-            coords = self.pca.transform(feats)
-            return float(coords[0,0]), float(coords[0,1])
-        except: return 0.0, 0.0
-        
-    def predict(self, abs_data):
-        if not self.is_trained: return "Unknown"
-        try:
-            feats = self.scaler.transform([list(abs_data.values())])
-            return self.classifier.predict(feats)[0]
-        except: return "Error"
+    def add_training_sample(self, snv_data, numeric_value):
+        """ Acumula datos para entrenamiento (NO guarda a disco para no bloquear MQTT) """
+        self.dataset_X.append(snv_data)
+        self.dataset_y.append(numeric_value)
+        print(f"[BRAIN] Muestra con valor {numeric_value} guardada. Total dataset: {len(self.dataset_X)}")
 
-    def teach(self, abs_data, label):
-        # Lo usaremos en la siguiente fase
-        self.X_train.append(list(abs_data.values()))
-        self.y_train.append(label)
-        self._retrain()
+    def train_model(self):
+        """ Entrena el modelo según el modo seleccionado """
+        # Filtrar muestras nulas que pudieron colarse
+        valid_pairs = [(x, y) for x, y in zip(self.dataset_X, self.dataset_y) if x is not None]
+        if len(valid_pairs) != len(self.dataset_X):
+            removed = len(self.dataset_X) - len(valid_pairs)
+            print(f"[BRAIN] AVISO: {removed} muestras nulas eliminadas del dataset.")
+            self.dataset_X = [p[0] for p in valid_pairs]
+            self.dataset_y = [p[1] for p in valid_pairs]
         
-    def _retrain(self):
-        if len(self.X_train) < 3: return
-        X = np.array(self.X_train)
-        self.scaler.fit(X)
-        X_scaled = self.scaler.transform(X)
-        self.pca.fit(X_scaled)
-        self.classifier.fit(X_scaled, self.y_train)
-        self.is_trained = True
-        self.save_brain()
+        print(f"[BRAIN] Entrenando modo {self.model_type} con {len(self.dataset_X)} muestras válidas.")
+        
+        if self.model_type == "DEVIATION":
+            if len(self.dataset_X) < 1:
+                print("[BRAIN] Se necesita al menos 1 muestra para entrenar la desviación.")
+                return False
+                
+            try:
+                X = np.array(self.dataset_X, dtype=float)
+                print(f"[BRAIN] Shape del dataset: {X.shape}")
+                # Extraer solo las bandas UV/IR
+                X_filtered = X[:, self.uv_ir_indices]
+                
+                # Scaler nos da el centroide (mean_) y varianza (scale_) del patrón oro
+                self.scaler = StandardScaler()
+                self.scaler.fit(X_filtered)
+                
+                self.is_trained = True
+                print(f"[BRAIN] ¡MODELO DE DESVIACIÓN ENTRENADO! Usando 8 bandas (UV/IR) con {len(X)} muestras base.")
+                self.save_brain()
+                return True
+            except Exception as e:
+                import traceback
+                print(f"[BRAIN] Error entrenando desviación: {e}")
+                traceback.print_exc()
+                return False
+                
+        else: # PLSR
+            if len(self.dataset_X) < 3:
+                print("[BRAIN] Insuficientes datos para entrenar regresión (min 3).")
+                return False
+                
+            try:
+                X = np.array(self.dataset_X)
+                y = np.array(self.dataset_y)
+                
+                # Scaler
+                self.scaler = StandardScaler()
+                X_scaled = self.scaler.fit_transform(X)
+                
+                # PLS Regression
+                n_comp = min(2, len(self.dataset_X) - 1)
+                if n_comp < 1: n_comp = 1
+                
+                self.model = PLSRegression(n_components=n_comp)
+                self.model.fit(X_scaled, y)
+                
+                y_pred = self.model.predict(X_scaled)
+                r2 = r2_score(y, y_pred)
+                
+                self.is_trained = True
+                print(f"[BRAIN] ¡MODELO PLSR ENTRENADO! R2 Score: {r2:.3f}")
+                self.save_brain()
+                return True
+            except Exception as e:
+                print(f"[BRAIN] Error entrenando regresión: {e}")
+                return False
+
+    def predict(self, snv_data):
+        if not self.is_trained: return None
+        try:
+            if self.model_type == "DEVIATION":
+                # Extraemos bandas
+                snv_array = np.array(snv_data)
+                features_filtered = snv_array[self.uv_ir_indices].reshape(1, -1)
+                # Estandarizamos respecto al centroide de la calibración
+                features_scaled = self.scaler.transform(features_filtered)
+                # Distancia Euclidiana desde el centroide (0,0...0)
+                distance = np.linalg.norm(features_scaled)
+                return round(float(distance), 3)
+            else: # PLSR
+                features = self.scaler.transform([snv_data])
+                prediction = self.model.predict(features).flatten()[0]
+                return round(float(prediction), 3)
+        except Exception as e: 
+            print(f"[BRAIN] Error en predicción: {e}")
+            return None
+
+    def get_coords(self, snv_data):
+        return 0.0, 0.0
+
+    # ==========================================
+    # 3. UTILIDADES Y PERSISTENCIA
+    # ==========================================
+    def _is_valid_sample(self, raw):
+        vals = self._extract_spectrum(raw)
+        if not vals: return False
+        arr = np.array(vals)
+        return not (np.any(arr <= 0) or np.any(arr > 64000))
 
     def save_brain(self):
         state = {
             "baseline": self.baseline,
-            "X": self.X_train,
-            "y": self.y_train,
+            "dataset_X": self.dataset_X,
+            "dataset_y": self.dataset_y,
             "trained": self.is_trained,
-            # Guardamos los objetos de sklearn si están entrenados
-            "pca": self.pca if self.is_trained else None,
-            "scaler": self.scaler if self.is_trained else None,
-            "knn": self.classifier if self.is_trained else None
+            "scaler": self.scaler,
+            "model": self.model,
+            "model_type": self.model_type
         }
         joblib.dump(state, MODEL_FILE)
-        print("[BRAIN] Memoria guardada en disco.")
 
     def load_brain(self):
         if os.path.exists(MODEL_FILE):
             try:
                 state = joblib.load(MODEL_FILE)
                 self.baseline = state["baseline"]
-                self.X_train = state["X"]
-                self.y_train = state["y"]
+                self.dataset_X = state.get("dataset_X", [])
+                self.dataset_y = state.get("dataset_y", [])
                 self.is_trained = state["trained"]
                 if self.is_trained:
-                    self.pca = state["pca"]
                     self.scaler = state["scaler"]
-                    self.classifier = state["knn"]
-                print("[BRAIN] Memoria cargada correctamente.")
-            except:
-                print("[BRAIN] Error al cargar memoria. Iniciando de cero.")
+                    self.model = state.get("model", None)
+                    self.model_type = state.get("model_type", "DEVIATION")
+                print(f"[BRAIN] Cargado. {len(self.dataset_X)} muestras. Modo: {self.model_type}")
+            except: pass
 
     def _get_wavelengths(self):
-        return [
-            "A_410nm", "B_435nm", "C_460nm", "D_485nm", "E_510nm", "F_535nm",
-            "G_560nm", "H_585nm", "I_645nm", "J_705nm", "K_900nm", "L_940nm",
-            "R_610nm", "S_680nm", "T_730nm", "U_760nm", "V_810nm", "W_860nm"
-        ]
+        return ["A_410nm", "B_435nm", "C_460nm", "D_485nm", "E_510nm", "F_535nm",
+                "G_560nm", "H_585nm", "I_645nm", "J_705nm", "K_900nm", "L_940nm",
+                "R_610nm", "S_680nm", "T_730nm", "U_760nm", "V_810nm", "W_860nm"]
 
     def _extract_spectrum(self, data):
-        values = []
+        vals = []
         try:
             for wl in self._get_wavelengths():
-                val = data.get(wl)
-                if val is None: val = data.get(f"raw_{wl}") # Compatibilidad
+                val = data.get(wl) if wl in data else data.get(f"raw_{wl}")
                 if val is None: return None
-                values.append(float(val))
-            return values
+                vals.append(float(val))
+            return vals
         except: return None

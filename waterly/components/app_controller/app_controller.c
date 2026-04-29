@@ -10,6 +10,8 @@
 #include "nextion.h"
 #include "mqtt_app.h"
 #include "ota_update.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"
 
 static const char *TAG = "APP_CTRL";
 
@@ -24,6 +26,17 @@ static const char *TAG = "APP_CTRL";
 
 #define OTA_JSON_URL        "https://raw.githubusercontent.com/LManuXx/Waterly/main/waterly/version.json"
 #define CURRENT_FIRMWARE_VER 1
+
+// --- OBJETOS NEXTION ---
+// page0.t0  = Status (texto corto: lo que está haciendo el equipo)
+// page0.t2  = WiFi   (estado de la conexión WiFi)
+// page0.j0  = Barra de progreso
+// page2.values = Valores del sensor NIR
+
+#define NX_STATUS   "page0.t0"
+#define NX_WIFI     "page0.t2"
+#define NX_BAR      "page0.j0"
+#define NX_VALUES   "page2.values"
 
 typedef enum {
     STATE_IDLE,
@@ -40,15 +53,17 @@ static bool sensor_ok = false;
 
 static void iniciar_sensor_interno() {
     ESP_LOGI(TAG, "Buscando sensor AS7265x...");
+    nextion_send_txt(NX_STATUS, "Buscando sensor");
     
     if (as7265x_init(&sensor, I2C_MASTER_NUM) == ESP_OK) {
         as7265x_set_integration_time(&sensor, 50);
         as7265x_set_bulb_current(&sensor, 0, false);
         sensor_ok = true;
         ESP_LOGI(TAG, "Sensor encontrado y configurado.");
+        nextion_send_txt(NX_STATUS, "Sensor OK");
     } else {
         ESP_LOGE(TAG, "FALLO: Sensor no responde.");
-        nextion_send_txt("values", "Error Sensor");
+        nextion_send_txt(NX_STATUS, "Sensor ERROR");
         sensor_ok = false;
     }
 }
@@ -56,7 +71,7 @@ static void iniciar_sensor_interno() {
 static void ejecutar_ota() {
     ESP_LOGW(TAG, ">>> INICIANDO PROTOCOLO OTA <<<");
     
-    nextion_send_txt("values", "SYSTEM UPDATE\rConnecting...");
+    nextion_send_txt(NX_STATUS, "Actualizando...");
     
     if (sensor_ok) {
         as7265x_set_bulb_current(&sensor, 0, false);
@@ -66,10 +81,10 @@ static void ejecutar_ota() {
 
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "No había actualización o chequeo finalizado.");
-        nextion_send_txt("values", "No Updates");
+        nextion_send_txt(NX_STATUS, "Sin updates");
     } else {
         ESP_LOGE(TAG, "Error en el proceso OTA");
-        nextion_send_txt("values", "Update Failed!");
+        nextion_send_txt(NX_STATUS, "Update FALLO");
     }
     
     vTaskDelay(pdMS_TO_TICKS(3000));
@@ -79,13 +94,17 @@ static void ejecutar_ota() {
 static void tomar_medida_y_enviar() {
     if (!sensor_ok) {
         ESP_LOGW(TAG, "Saltando medida (Sensor Offline)");
-        nextion_send_txt("values", "Sensor Offline");
+        nextion_send_txt(NX_STATUS, "Sin sensor");
         return;
     }
 
     as7265x_values_t data;
     
     ESP_LOGD(TAG, "Iniciando secuencia de medida...");
+    nextion_send_txt(NX_STATUS, "Midiendo...");
+    
+    // Iniciar barra de progreso
+    nextion_set_progress_bar(NX_BAR, 10);
     
     as7265x_set_bulb_current(&sensor, LED_DRV_CURRENT, true);
     vTaskDelay(pdMS_TO_TICKS(50)); 
@@ -112,8 +131,11 @@ static void tomar_medida_y_enviar() {
             
             ESP_LOGI(TAG, "DATA FULL SPECTRUM LEIDA");
 
-            // --- FORMATO LARGO (UV, VIS, NIR) ---
-            // Aumentamos el buffer porque el texto es muy largo
+            // Barra completada
+            nextion_set_progress_bar(NX_BAR, 100);
+            nextion_send_txt(NX_STATUS, "Datos listos");
+
+            // --- FORMATO LARGO (18 CANALES) ---
             char buffer[256]; 
             
             // Construimos el string con saltos de línea (\r) para que salga ordenado
@@ -125,24 +147,26 @@ static void tomar_medida_y_enviar() {
                 data.G, data.H, data.I, data.J, data.K, data.L,
                 data.R, data.S, data.T, data.U, data.V, data.W);
             
-            nextion_send_txt("values", buffer);
+            nextion_send_txt(NX_VALUES, buffer);
 
             mqtt_app_send_full_spectrum(&data);
 
         } else {
             ESP_LOGE(TAG, "Error I2C al leer registros");
-            nextion_send_txt("values", "Err: I2C Read");
+            nextion_send_txt(NX_STATUS, "Error I2C");
+            nextion_set_progress_bar(NX_BAR, 0);
         }
     } else {
         ESP_LOGE(TAG, "Timeout: El sensor nunca terminó de medir");
-        nextion_send_txt("values", "Err: Timeout");
+        nextion_send_txt(NX_STATUS, "Timeout sensor");
+        nextion_set_progress_bar(NX_BAR, 0);
     }
 }
 
 static void ir_a_dormir() {
     ESP_LOGW(TAG, "Ejecutando secuencia de Deep Sleep...");
     
-    nextion_send_txt("values", "Estado: SLEEP\rZzz...");
+    nextion_send_txt(NX_STATUS, "Durmiendo...");
     
     if (sensor_ok) {
         as7265x_set_bulb_current(&sensor, 0, false);
@@ -164,45 +188,60 @@ static void app_controller_task(void *pvParameters) {
     iniciar_sensor_interno();
 
     // Actualizamos el estado inicial al arrancar
-    nextion_send_txt("t0", "Status: IDLE");
+    nextion_send_txt(NX_STATUS, "Listo");
 
     while (1) {
         esp_task_wdt_reset();
         if (xQueueReceive(event_queue, &event, 0) == pdTRUE) {
             
-            // --- ACTUALIZACIÓN DE ESTADO EN PANTALLA (t0) ---
             switch (event) {
                 case APP_EVENT_GO_IDLE:
                     ESP_LOGI(TAG, ">>> MODO: IDLE <<<");
                     current_state = STATE_IDLE;
-                    nextion_send_txt("t0", "Status: IDLE");
+                    nextion_send_txt(NX_STATUS, "En reposo");
+                    nextion_set_progress_bar(NX_BAR, 0);
                     break;
 
                 case APP_EVENT_START_TRAINING:
                     ESP_LOGI(TAG, ">>> MODO: TRAINING <<<");
                     current_state = STATE_TRAINING;
                     last_wake_time = xTaskGetTickCount();
-                    nextion_send_txt("t0", "Status: TRAINING");
-                    nextion_send_txt("values", "Training Loop...");
+                    nextion_send_txt(NX_STATUS, "Escaneando...");
                     break;
                     
                 case APP_EVENT_SINGLE_MEASURE:
                     ESP_LOGI(TAG, ">>> MODO: SINGLE MEASURE <<<");
                     current_state = STATE_SINGLE_MEASURE;
-                    nextion_send_txt("t0", "Status: MEASURING");
-                    nextion_send_txt("values", "Midiendo...");
+                    nextion_send_txt(NX_STATUS, "Lectura unica");
                     break;
 
                 case APP_EVENT_STOP_AND_SLEEP:
                     ESP_LOGI(TAG, ">>> MODO: SLEEPING <<<");
                     current_state = STATE_SLEEPING;
-                    nextion_send_txt("t0", "Status: SLEEP");
+                    nextion_send_txt(NX_STATUS, "Apagando...");
                     break;
                 
                 case APP_EVENT_START_OTA:
                     ESP_LOGW(TAG, ">>> MODO: OTA UPDATE <<<");
                     current_state = STATE_UPDATING;
-                    nextion_send_txt("t0", "Status: OTA UPDATE");
+                    nextion_send_txt(NX_STATUS, "Buscando OTA");
+                    break;
+                    
+                case APP_EVENT_CHECK_WIFI:
+                    ESP_LOGI(TAG, ">>> COMPROBANDO WIFI <<<");
+                    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+                    if (netif) {
+                        esp_netif_ip_info_t ip_info;
+                        if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
+                            char ip_str[32];
+                            snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&ip_info.ip));
+                            nextion_send_txt(NX_WIFI, ip_str);
+                        } else {
+                            nextion_send_txt(NX_WIFI, "Sin conexion");
+                        }
+                    } else {
+                        nextion_send_txt(NX_WIFI, "WiFi error");
+                    }
                     break;
             }
         }
@@ -218,7 +257,7 @@ static void app_controller_task(void *pvParameters) {
                 
                 // Volvemos a IDLE automáticamente
                 current_state = STATE_IDLE; 
-                nextion_send_txt("t0", "Status: IDLE"); // Actualizamos texto al volver
+                nextion_send_txt(NX_STATUS, "En reposo");
                 break;
 
             case STATE_TRAINING:

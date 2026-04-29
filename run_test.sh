@@ -1,0 +1,1 @@
+docker exec waterly_api python /app/test_brain.py

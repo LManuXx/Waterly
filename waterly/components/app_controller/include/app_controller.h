@@ -10,7 +10,8 @@ typedef enum {
     APP_EVENT_STOP_AND_SLEEP, // Orden de dormir
     APP_EVENT_SINGLE_MEASURE,    // Medir una vez
     APP_EVENT_START_OTA,
-    APP_EVENT_GO_IDLE
+    APP_EVENT_GO_IDLE,
+    APP_EVENT_CHECK_WIFI      // Consulta estado wifi
 } app_event_t;
 
 

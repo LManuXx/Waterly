@@ -32,6 +32,15 @@ void nextion_send_txt(const char* obj_name, const char* text) {
     nextion_send_cmd(buffer);
 }
 
+void nextion_set_progress_bar(const char* obj_name, int value) {
+    char buffer[64];
+    // Formato Nextion para valores numéricos: objeto.val=100
+    if (value < 0) value = 0;
+    if (value > 100) value = 100;
+    snprintf(buffer, sizeof(buffer), "%s.val=%d", obj_name, value);
+    nextion_send_cmd(buffer);
+}
+
 // --- TAREA DE RECEPCIÓN (RX) ---
 // Escucha lo que pulsas en la pantalla
 static void nextion_rx_task(void *arg) {
@@ -58,34 +67,39 @@ static void nextion_rx_task(void *arg) {
                     // Filtramos por página (Tus botones están en Page 1 según me dijiste)
                     if (page == 1) {
                         switch (id) {
-                            case 0x01: // IDLE
+                            case NEXTION_BTN_ID_IDLE:
                                 ESP_LOGI(TAG, "Boton IDLE presionado");
                                 app_controller_send_event(APP_EVENT_GO_IDLE);
                                 break;
 
-                            case 0x04: // SCAN
+                            case NEXTION_BTN_ID_SCAN:
                                 ESP_LOGI(TAG, "Boton SCAN presionado");
                                 app_controller_send_event(APP_EVENT_SINGLE_MEASURE);
                                 break;
 
-                            case 0x05: // TRAIN
-                                ESP_LOGI(TAG, "Boton TRAIN presionado");
+                            case NEXTION_BTN_ID_TRAIN:
+                                ESP_LOGI(TAG, "Boton TRAIN presionado (Continuo)");
                                 app_controller_send_event(APP_EVENT_START_TRAINING);
                                 break;
 
-                            case 0x02: // OTA
+                            case NEXTION_BTN_ID_OTA:
                                 ESP_LOGI(TAG, "Boton OTA presionado");
                                 app_controller_send_event(APP_EVENT_START_OTA);
                                 break;
 
-                            case 0x06: // SLEEP
+                            case NEXTION_BTN_ID_SLEEP:
                                 ESP_LOGI(TAG, "Boton SLEEP presionado");
                                 app_controller_send_event(APP_EVENT_STOP_AND_SLEEP);
                                 break;
 
-                            case 0x07: // RESET
+                            case NEXTION_BTN_ID_RESET:
                                 ESP_LOGW(TAG, "Boton RESET -> Reiniciando ESP32...");
                                 esp_restart();
+                                break;
+                                
+                            case NEXTION_BTN_ID_WIFI_CHECK:
+                                ESP_LOGI(TAG, "Boton WIFI CHECK presionado");
+                                app_controller_send_event(APP_EVENT_CHECK_WIFI);
                                 break;
 
                             default:
