@@ -21,15 +21,12 @@ static int s_retry_num = 0;
 static void event_handler(void* arg, esp_event_base_t event_base,
                           int32_t event_id, void* event_data)
 {
-    // 1. Iniciar conexión
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
-    } 
-    // 2. Si se desconecta o falla la conexión
+    }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        
+
         if (s_retry_num < MAXIMUM_RETRY) {
-            // Aún nos quedan intentos... probamos otra vez
             esp_wifi_connect();
             s_retry_num++;
             ESP_LOGW(TAG, "Reintentando conexión al AP... (%d/%d)", s_retry_num, MAXIMUM_RETRY);
@@ -37,30 +34,19 @@ static void event_handler(void* arg, esp_event_base_t event_base,
             snprintf(retry_msg, sizeof(retry_msg), "WiFi %d/%d", s_retry_num, MAXIMUM_RETRY);
             nextion_send_txt("page0.t2", retry_msg);
         } else {
-            // Se acabaron los intentos. Asumimos que el WiFi cambió o es incorrecto.
-            ESP_LOGE(TAG, "Fallo crítico: No se puede conectar al WiFi guardado.");
-            ESP_LOGE(TAG, ">>> BORRANDO CREDENCIALES Y REINICIANDO EN MODO CONFIGURACION <<<");
-            nextion_send_txt("page0.t2", "Usa BLE config");
-            
-            // Re-inicializamos el manager brevemente para poder ejecutar el comando de borrado
-            wifi_prov_mgr_config_t config = {
-                .scheme = wifi_prov_scheme_ble,
-                .scheme_event_handler = WIFI_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM
-            };
-            wifi_prov_mgr_init(config);
-            
-            // Esta función mágica borra el WiFi de la memoria Flash
-            wifi_prov_mgr_reset_provisioning();
-            
-            // Reiniciamos para empezar limpio (entrará en modo Bluetooth al arrancar)
-            esp_restart();
+            ESP_LOGW(TAG, "Superados los reintentos. Esperando 30s antes de reintentar...");
+            nextion_send_txt("page0.t2", "WiFi offline");
+            s_retry_num = 0;
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGI(TAG, "Reconectando tras espera (%d/%d)", s_retry_num, MAXIMUM_RETRY);
         }
-    } 
-    // 3. Conexión Exitosa
+    }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "¡Conectado! IP:" IPSTR, IP2STR(&event->ip_info.ip));
-        s_retry_num = 0; // Reseteamos contador por si se desconecta en el futuro
+        s_retry_num = 0;
         char ip_str[20];
         snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&event->ip_info.ip));
         nextion_send_txt("page0.t2", ip_str);

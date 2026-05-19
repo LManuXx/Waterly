@@ -20,11 +20,11 @@ static const char *TAG = "MAIN";
 void actualizar_carga(int porcentaje, const char* texto) {
     char cmd[30];
     
-    // 1. Actualizar texto
-    nextion_send_txt("t0", texto);
+    // 1. Actualizar texto de status
+    nextion_send_txt("page0.t0", texto);
     
-    // 2. Actualizar barra de progreso (j0)
-    snprintf(cmd, sizeof(cmd), "j0.val=%d", porcentaje);
+    // 2. Actualizar barra de progreso
+    snprintf(cmd, sizeof(cmd), "page0.j0.val=%d", porcentaje);
     nextion_send_cmd(cmd);
     
     // Pequeño delay para que el ojo humano vea el cambio
@@ -73,13 +73,11 @@ void app_main(void)
         // 2. Subida lenta y suave (De 0 a 100 de 1 en 1)
         // Total tiempo: 100 pasos * 25ms = 2500ms (2.5 segundos)
         ESP_LOGI(TAG, "Iniciando Fade-In...");
-        for(int i=0; i<=100; i++) {
+        for(int i=0; i<=100; i += 5) {
             char dim_cmd[16];
             snprintf(dim_cmd, sizeof(dim_cmd), "dim=%d", i);
             nextion_send_cmd(dim_cmd);
-            
-            // 25ms por paso da una sensación muy fluida
-            vTaskDelay(pdMS_TO_TICKS(25)); 
+            vTaskDelay(pdMS_TO_TICKS(25));
         }
 
         // Empezamos la barra al 10%
@@ -122,8 +120,8 @@ void app_main(void)
         
         // Durante este delay, llenamos la barra lentamente hasta el final
         for(int i=90; i<=100; i++) {
-             char j_cmd[20];
-             snprintf(j_cmd, sizeof(j_cmd), "j0.val=%d", i);
+             char j_cmd[24];
+             snprintf(j_cmd, sizeof(j_cmd), "page0.j0.val=%d", i);
              nextion_send_cmd(j_cmd);
              vTaskDelay(pdMS_TO_TICKS(500)); // Repartimos los 5s aquí
         }
@@ -135,8 +133,8 @@ void app_main(void)
         app_controller_send_event(APP_EVENT_GO_IDLE);
 
     } else {
-        actualizar_carga(0, "Error WiFi"); // Barra a 0 en rojo si pudieras cambiar color
-        nextion_send_txt("t0", "Fallo Critico WiFi");
+        actualizar_carga(0, "Error WiFi");
+        nextion_send_txt("page0.t0", "Fallo WiFi");
         ESP_LOGE(TAG, "Fallo crítico WiFi");
     }
 

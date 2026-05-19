@@ -15,13 +15,13 @@
 
 static const char *TAG = "APP_CTRL";
 
-#define EVENT_QUEUE_SIZE        10
+#define EVENT_QUEUE_SIZE        16
 #define TIEMPO_ENTRE_MUESTRAS   3000
 #define TIEMPO_DEEP_SLEEP_MIN   1
 #define I2C_MASTER_NUM          I2C_NUM_0
 
-#define SENSOR_POLL_DELAY_MS    10   
-#define SENSOR_TIMEOUT_MS       1000 
+#define SENSOR_POLL_DELAY_MS    10
+#define SENSOR_TIMEOUT_MS        1500
 #define LED_DRV_CURRENT         0
 
 #define OTA_JSON_URL        "https://raw.githubusercontent.com/LManuXx/Waterly/main/waterly/version.json"
@@ -107,7 +107,7 @@ static void tomar_medida_y_enviar() {
     nextion_set_progress_bar(NX_BAR, 10);
     
     as7265x_set_bulb_current(&sensor, LED_DRV_CURRENT, true);
-    vTaskDelay(pdMS_TO_TICKS(50)); 
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     as7265x_set_config(&sensor, AS7265X_MEASUREMENT_MODE_6_CHAN_ONE_SHOT, AS7265X_GAIN_64X);
 
@@ -124,39 +124,38 @@ static void tomar_medida_y_enviar() {
         intentos++;
     }
 
-    as7265x_set_bulb_current(&sensor, LED_DRV_CURRENT, false);
-
     if (data_ready) {
         if (as7265x_get_all_values(&sensor, &data) == ESP_OK) {
-            
+            as7265x_set_bulb_current(&sensor, LED_DRV_CURRENT, false);
             ESP_LOGI(TAG, "DATA FULL SPECTRUM LEIDA");
 
-            // Barra completada
             nextion_set_progress_bar(NX_BAR, 100);
-            nextion_send_txt(NX_STATUS, "Datos listos");
 
-            // --- FORMATO LARGO (18 CANALES) ---
-            char buffer[256]; 
-            
-            // Construimos el string con saltos de línea (\r) para que salga ordenado
-            snprintf(buffer, sizeof(buffer), 
-                "[UV] A:%.2f | B:%.2f | C:%.2f | D:%.2f | E:%.2f | F:%.2f\r"
-                "[VIS] G:%.2f | H:%.2f | I:%.2f | J:%.2f | K:%.2f | L:%.2f\r"
-                "[NIR] R:%.2f | S:%.2f | T:%.2f | U:%.2f | V:%.2f | W:%.2f",
-                data.A, data.B, data.C, data.D, data.E, data.F,
-                data.G, data.H, data.I, data.J, data.K, data.L,
-                data.R, data.S, data.T, data.U, data.V, data.W);
-            
-            nextion_send_txt(NX_VALUES, buffer);
+            if (current_state == STATE_SINGLE_MEASURE || current_state == STATE_IDLE) {
+                nextion_send_txt(NX_STATUS, "Datos listos");
+
+                char buffer[256];
+                snprintf(buffer, sizeof(buffer),
+                    "[UV] A:%.2f | B:%.2f | C:%.2f | D:%.2f | E:%.2f | F:%.2f\r"
+                    "[VIS] G:%.2f | H:%.2f | I:%.2f | J:%.2f | K:%.2f | L:%.2f\r"
+                    "[NIR] R:%.2f | S:%.2f | T:%.2f | U:%.2f | V:%.2f | W:%.2f",
+                    data.A, data.B, data.C, data.D, data.E, data.F,
+                    data.G, data.H, data.I, data.J, data.K, data.L,
+                    data.R, data.S, data.T, data.U, data.V, data.W);
+
+                nextion_send_txt(NX_VALUES, buffer);
+            }
 
             mqtt_app_send_full_spectrum(&data);
 
         } else {
+            as7265x_set_bulb_current(&sensor, LED_DRV_CURRENT, false);
             ESP_LOGE(TAG, "Error I2C al leer registros");
             nextion_send_txt(NX_STATUS, "Error I2C");
             nextion_set_progress_bar(NX_BAR, 0);
         }
     } else {
+        as7265x_set_bulb_current(&sensor, LED_DRV_CURRENT, false);
         ESP_LOGE(TAG, "Timeout: El sensor nunca terminó de medir");
         nextion_send_txt(NX_STATUS, "Timeout sensor");
         nextion_set_progress_bar(NX_BAR, 0);
@@ -182,7 +181,6 @@ static void ir_a_dormir() {
 
 static void app_controller_task(void *pvParameters) {
     app_event_t event;
-    TickType_t last_wake_time = xTaskGetTickCount();
     esp_task_wdt_add(NULL);
     
     iniciar_sensor_interno();
@@ -192,7 +190,27 @@ static void app_controller_task(void *pvParameters) {
 
     while (1) {
         esp_task_wdt_reset();
-        if (xQueueReceive(event_queue, &event, 0) == pdTRUE) {
+        
+        // --- ESPERA INTELIGENTE ---
+        // En IDLE: esperamos indefinidamente (bloqueado, 0% CPU)
+        // En TRAINING: esperamos 3s; si llega un comando, reaccionamos al instante
+        // En otros estados: no esperamos (acción inmediata)
+        TickType_t wait_time;
+        switch (current_state) {
+            case STATE_IDLE:
+                wait_time = pdMS_TO_TICKS(5000);  // Máximo 5s para el watchdog
+                break;
+            case STATE_TRAINING:
+                wait_time = pdMS_TO_TICKS(TIEMPO_ENTRE_MUESTRAS); // 3s entre medidas
+                break;
+            default:
+                wait_time = 0; // Sin espera para acciones inmediatas
+                break;
+        }
+        
+        // --- RECEPCIÓN DE EVENTOS ---
+        // Si llega un evento DURANTE la espera, se procesa INMEDIATAMENTE
+        if (xQueueReceive(event_queue, &event, wait_time) == pdTRUE) {
             
             switch (event) {
                 case APP_EVENT_GO_IDLE:
@@ -205,7 +223,6 @@ static void app_controller_task(void *pvParameters) {
                 case APP_EVENT_START_TRAINING:
                     ESP_LOGI(TAG, ">>> MODO: TRAINING <<<");
                     current_state = STATE_TRAINING;
-                    last_wake_time = xTaskGetTickCount();
                     nextion_send_txt(NX_STATUS, "Escaneando...");
                     break;
                     
@@ -244,25 +261,28 @@ static void app_controller_task(void *pvParameters) {
                     }
                     break;
             }
+            
+            // Después de procesar un evento, volvemos arriba SIN ejecutar la acción
+            // del estado anterior. Así un GO_IDLE frena inmediatamente.
+            continue;
         }
 
+        // --- ACCIONES DEL ESTADO (solo si NO hubo evento) ---
         switch (current_state) {
             case STATE_IDLE:
-                vTaskDelay(pdMS_TO_TICKS(100));
+                // No hacer nada, ya esperamos arriba
                 break;
 
             case STATE_SINGLE_MEASURE:
                 tomar_medida_y_enviar();
                 ESP_LOGI(TAG, "Medida única completada, volviendo a IDLE.");
-                
-                // Volvemos a IDLE automáticamente
                 current_state = STATE_IDLE; 
                 nextion_send_txt(NX_STATUS, "En reposo");
                 break;
 
             case STATE_TRAINING:
+                // El timeout de 3s ya pasó, tomamos la medida
                 tomar_medida_y_enviar();
-                vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(TIEMPO_ENTRE_MUESTRAS));
                 break;
 
             case STATE_SLEEPING:
@@ -286,8 +306,9 @@ esp_err_t app_controller_init(void) {
 
 bool app_controller_send_event(app_event_t event) {
     if (event_queue == NULL) return false;
-    if (xQueueSend(event_queue, &event, 0) == pdTRUE) {
+    if (xQueueSendToBack(event_queue, &event, pdMS_TO_TICKS(10)) == pdTRUE) {
         return true;
     }
+    ESP_LOGW(TAG, "Event queue overflow, dropped event %d", event);
     return false;
 }
