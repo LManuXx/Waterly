@@ -3,6 +3,7 @@ uvicorn
 paho-mqtt
 requests
 influxdb-client
-numpy          
+numpy
 scikit-learn
-joblib          
+scipy
+joblib

@@ -194,7 +194,7 @@ def send_telemetry(raw_data, abs_data=None, is_calibrated=False, prediction_stat
 
 
 def on_mosquitto_message(client, userdata, msg):
-    global CURRENT_STATE, BURST_CONTEXT
+    global CURRENT_STATE, BURST_CONTEXT, BURST_TIMER
 
     try:
         raw_payload = msg.payload.decode()
@@ -236,7 +236,7 @@ def on_mosquitto_message(client, userdata, msg):
             }))
 
             if count < target:
-                client_mosquitto.publish("waterly/comandos", json.dumps({"mode": "single"}), retain=False)
+                client_mosquitto.publish("waterly/comandos", json.dumps({"mode": "single"}), qos=1, retain=False)
             else:
                 if BURST_TIMER:
                     BURST_TIMER.cancel()
@@ -295,21 +295,27 @@ def on_mosquitto_message(client, userdata, msg):
 
 # --- PUENTE MQTT (NUBE -> ESP32) ---
 def on_tb_message(client, userdata, msg):
-    global CURRENT_STATE, BURST_CONTEXT
+    global CURRENT_STATE, BURST_CONTEXT, BURST_TIMER
     
     try:
         data = json.loads(msg.payload)
         method = data.get("method")
         params = data.get("params")
-        
+        rpc_id = msg.topic.split("/")[-1] if "/" in msg.topic else "0"
+
         esp_payload = None
-        should_retain = False 
-        
-        print(f"[RPC] Recibido: {method} | params: {params}")
+        should_retain = False
+
+        print(f"[RPC] Recibido: {method} | params: {params} | id: {rpc_id}")
 
         if method == "setIdle":
             CURRENT_STATE = SystemState.IDLE
+            BURST_CONTEXT = {"target_count": 0, "current_buffer": [], "label": "Unknown"}
+            if BURST_TIMER is not None:
+                BURST_TIMER.cancel()
+                BURST_TIMER = None
             esp_payload = {"mode": "idle"}
+            should_retain = True
             client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": "Forzado a Reposo"}))
             
         elif method == "startFreeMeasure":
@@ -339,6 +345,20 @@ def on_tb_message(client, userdata, msg):
             should_retain = True
 
         elif method == "startAnalysis":
+            if not brain.is_trained:
+                client_tb.publish("v1/devices/me/telemetry", json.dumps({
+                    "prediction_status": "Error: Modelo no entrenado. Primero haz trainModel.",
+                    "pred_deviation": 0.0
+                }))
+                print("[CMD] startAnalysis bloqueado: modelo no entrenado.")
+                return
+            if brain.baseline is None:
+                client_tb.publish("v1/devices/me/telemetry", json.dumps({
+                    "prediction_status": "Error: Falta calibrar (baseline no establecida).",
+                    "pred_deviation": 0.0
+                }))
+                print("[CMD] startAnalysis bloqueado: falta calibrar.")
+                return
             samples = int(params) if params else 5
             CURRENT_STATE = SystemState.ANALYSIS
             BURST_CONTEXT = {"target_count": samples, "current_buffer": [], "label": "Unknown"}
@@ -346,23 +366,39 @@ def on_tb_message(client, userdata, msg):
             should_retain = True
             
         elif method == "trainModel":
-            # Si hay un burst en curso, avisar y no bloquear
             if CURRENT_STATE in [SystemState.CALIBRATION, SystemState.TRAINING, SystemState.ANALYSIS]:
-                client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": "Burst en curso, espera"}))
-                print("[CMD] Burst en curso, no se puede entrenar ahora.")
+                msg = f"Burst activo ({CURRENT_STATE.value}). Pulsa IDLE y espera."
+                client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": msg}))
+                print(f"[CMD] Burst en curso ({CURRENT_STATE.value}), no se puede entrenar ahora.")
                 return
             
             # Entrenar en un hilo separado para no bloquear la cola MQTT
             def _train():
                 n_samples = len(brain.dataset_X)
                 print(f"[CMD] Entrenando modelo ({brain.model_type}) con {n_samples} muestras...")
+                client_tb.publish("v1/devices/me/telemetry", json.dumps({
+                    "prediction_status": f"Entrenando modelo {brain.model_type} con {n_samples} muestras..."
+                }))
                 success = brain.train_model()
                 if success:
-                    status_msg = f"Modelo OK ({n_samples} muestras)"
+                    metrics = brain.get_model_info()
+                    if brain.model_type == "DEVIATION":
+                        summary = f"ENTRENAMIENTO COMPLETADO | DEVIATION | {metrics.get('n_samples','?')} muestras | {metrics.get('n_features','?')} bandas"
+                    else:
+                        r2 = metrics.get("r2_train", 0)
+                        rmsecv = metrics.get("rmsecv", 0)
+                        n_comp = metrics.get("n_components", 0)
+                        summary = f"ENTRENAMIENTO COMPLETADO | PLSR | {n_samples} muestras | {n_comp} comp | R2={r2:.2f} | RMSECV={rmsecv:.1f} mg/L"
+                    client_tb.publish("v1/devices/me/telemetry", json.dumps({
+                        "prediction_status": summary,
+                        "pred_deviation": metrics.get("rmsecv", 0),
+                        "model_ready": True
+                    }))
                 else:
-                    status_msg = f"Error. Muestras: {n_samples}"
-                print(f"[CMD] ML Resultado: {status_msg}")
-                client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": status_msg}))
+                    client_tb.publish("v1/devices/me/telemetry", json.dumps({
+                        "prediction_status": f"ERROR ENTRENAMIENTO | Muestras: {n_samples} | Mira logs del API"
+                    }))
+                print(f"[CMD] ML Resultado: {'OK' if success else 'Error'}")
             
             threading.Thread(target=_train, daemon=True).start()
             return
@@ -384,9 +420,16 @@ def on_tb_message(client, userdata, msg):
             client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": "Modo: PLSR"}))
             return
 
+        elif method == "getModelInfo":
+            info = brain.get_model_info()
+            client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": json.dumps(info)}))
+            return
+
         if esp_payload:
             client_mosquitto.publish("waterly/comandos", json.dumps(esp_payload), retain=should_retain)
-            
+            client_tb.publish(f"v1/devices/me/rpc/response/{rpc_id}", json.dumps({"result": "ok"}))
+            print(f"[RPC] Forwarded to ESP32 via Mosquitto: {esp_payload} (retain={should_retain})")
+
     except Exception as e:
         print(f"Error RPC: {e}")
 
@@ -410,13 +453,8 @@ def start_bridge():
         else:
             print(f"[MQTT] Error conexión Mosquitto: {rc}")
 
-    def on_mosquitto_disconnect(client, userdata, flags, rc, properties=None):
-        print(f"[MQTT] Mosquitto desconectado (rc={rc}), reintentando en 5s...")
-        time.sleep(5)
-        try:
-            client_mosquitto.reconnect()
-        except Exception as e:
-            print(f"[MQTT] Error en reconnect Mosquitto: {e}")
+    def on_mosquitto_disconnect(client, userdata, rc):
+        print(f"[MQTT] Mosquitto desconectado (rc={rc}), paho-mqtt intentara reconnect...")
 
     def on_tb_connect(client, userdata, flags, rc, properties=None):
         if rc == 0:
@@ -425,18 +463,15 @@ def start_bridge():
         else:
             print(f"[MQTT] Error conexión ThingsBoard: {rc}")
 
-    def on_tb_disconnect(client, userdata, flags, rc, properties=None):
-        print(f"[MQTT] ThingsBoard desconectado (rc={rc}), reintentando en 5s...")
-        time.sleep(5)
-        try:
-            client_tb.reconnect()
-        except Exception as e:
-            print(f"[MQTT] Error en reconnect ThingsBoard: {e}")
+    def on_tb_disconnect(client, userdata, rc):
+        print(f"[MQTT] ThingsBoard desconectado (rc={rc}), paho-mqtt intentara reconnect...")
 
     client_mosquitto.on_connect = on_mosquitto_connect
     client_mosquitto.on_disconnect = on_mosquitto_disconnect
+    client_mosquitto.on_message = on_mosquitto_message
     client_tb.on_connect = on_tb_connect
     client_tb.on_disconnect = on_tb_disconnect
+    client_tb.on_message = on_tb_message
 
     try:
         client_mosquitto.connect(MOSQUITTO_HOST, 1883, 60)

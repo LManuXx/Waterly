@@ -43,7 +43,7 @@ services:
       - TB_HOST=thingsboard
       - PYTHONUNBUFFERED=1
     volumes:
-      - waterly_model:/app/
+      - waterly_model:/app/data/
 
     depends_on:
       mosquitto:
