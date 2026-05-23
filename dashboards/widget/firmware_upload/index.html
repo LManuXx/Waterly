@@ -1,0 +1,23 @@
+<div class="firmware-panel">
+  <h2>Actualizacion de Firmware</h2>
+  
+  <div class="field">
+    <label for="firmwareFile">Archivo .bin del firmware</label>
+    <input type="file" id="firmwareFile" accept=".bin">
+    <div id="fileInfo" class="file-info"></div>
+  </div>
+  
+  <div class="field">
+    <label for="firmwareVersion">Version del firmware (numero entero)</label>
+    <input type="number" id="firmwareVersion" placeholder="Ej: 5" min="1">
+    <div class="hint">Debe ser mayor que la version actual del ESP32 para que se actualice.</div>
+  </div>
+  
+  <button class="btn-upload" id="uploadBtn">Subir y Actualizar</button>
+  
+  <div id="progressBar" class="progress-bar">
+    <div id="progressFill" class="progress-bar-fill"></div>
+  </div>
+  
+  <div id="status" class="status"></div>
+</div>

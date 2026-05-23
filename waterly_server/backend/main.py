@@ -4,7 +4,11 @@ import time
 import threading
 import os
 import requests
-from fastapi import FastAPI
+import shutil
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import ASYNCHRONOUS
 from brain import SpectralBrain
@@ -42,6 +46,10 @@ BURST_CONTEXT = {
 BURST_TIMER = None
 BURST_TIMEOUT_S = 20
 
+FIRMWARE_DIR = "/app/firmware"
+FIRMWARE_BIN = os.path.join(FIRMWARE_DIR, "waterly.bin")
+FIRMWARE_VERSION_JSON = os.path.join(FIRMWARE_DIR, "version.json")
+
 brain = SpectralBrain()
 
 try:
@@ -57,6 +65,14 @@ client_tb = mqtt.Client(client_id="Bridge_To_ThingsBoard")
 client_tb.username_pw_set(TB_ACCESS_TOKEN)
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def clean_and_validate_data(raw_json):
     try:
@@ -444,7 +460,6 @@ def on_tb_message(client, userdata, msg):
             return
 
         elif method == "factoryReset":
-            # Factory reset del ESP32
             reset_payload = {"config": {"factory_reset": True}}
             client_mosquitto.publish("waterly/comandos", json.dumps(reset_payload), qos=1, retain=False)
             client_tb.publish(f"v1/devices/me/rpc/response/{rpc_id}", json.dumps({"result": "Factory reset enviado"}))
@@ -452,6 +467,24 @@ def on_tb_message(client, userdata, msg):
                 "prediction_status": "Factory Reset enviado al ESP32"
             }))
             print("[CONFIG] Factory Reset enviado al ESP32")
+            return
+
+        elif method == "updateFirmware":
+            if os.path.exists(FIRMWARE_BIN) and os.path.exists(FIRMWARE_VERSION_JSON):
+                with open(FIRMWARE_VERSION_JSON, "r") as f:
+                    ver_data = json.load(f)
+                client_mosquitto.publish("waterly/comandos", json.dumps({"update": True}), qos=1, retain=False)
+                client_tb.publish(f"v1/devices/me/rpc/response/{rpc_id}", json.dumps({"result": f"Update iniciado (v{ver_data['version']})"}))
+                client_tb.publish("v1/devices/me/telemetry", json.dumps({
+                    "prediction_status": f"OTA iniciada - version {ver_data['version']}"
+                }))
+                print(f"[OTA] updateFirmware RPC -> ESP32 (v{ver_data['version']})")
+            else:
+                client_tb.publish(f"v1/devices/me/rpc/response/{rpc_id}", json.dumps({"result": "error: no firmware uploaded"}))
+                client_tb.publish("v1/devices/me/telemetry", json.dumps({
+                    "prediction_status": "Error: No hay firmware subido"
+                }))
+                print("[OTA] updateFirmware RPC -> sin firmware disponible")
             return
 
         if esp_payload:
@@ -513,3 +546,45 @@ def start_bridge():
 
 @app.get("/")
 def read_root(): return {"status": "Online", "state": CURRENT_STATE.value}
+
+@app.get("/api/firmware/version")
+def get_firmware_version():
+    if os.path.exists(FIRMWARE_VERSION_JSON):
+        with open(FIRMWARE_VERSION_JSON, "r") as f:
+            return json.load(f)
+    return JSONResponse(status_code=404, content={"error": "No firmware uploaded"})
+
+@app.post("/api/firmware/upload")
+async def upload_firmware(file: UploadFile = File(...), version: int = Form(...)):
+    if not file.filename or not file.filename.endswith(".bin"):
+        raise HTTPException(status_code=400, detail="Solo se aceptan archivos .bin")
+    
+    if version < 1:
+        raise HTTPException(status_code=400, detail="La version debe ser >= 1")
+    
+    os.makedirs(FIRMWARE_DIR, exist_ok=True)
+    
+    with open(FIRMWARE_BIN, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    
+    file_size = os.path.getsize(FIRMWARE_BIN)
+    
+    version_data = {
+        "version": version,
+        "url": "http://waterly.local:8000/firmware/waterly.bin"
+    }
+    with open(FIRMWARE_VERSION_JSON, "w") as f:
+        json.dump(version_data, f)
+    
+    print(f"[OTA] Firmware v{version} subido ({file_size} bytes)")
+    
+    def trigger_ota():
+        time.sleep(1)
+        client_mosquitto.publish("waterly/comandos", json.dumps({"update": True}), qos=1, retain=False)
+        print("[OTA] Comando update enviado al ESP32")
+    
+    threading.Thread(target=trigger_ota, daemon=True).start()
+    
+    return {"status": "ok", "version": version, "size": file_size}
+
+app.mount("/firmware", StaticFiles(directory=FIRMWARE_DIR), name="firmware")

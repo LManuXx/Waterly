@@ -12,6 +12,7 @@
 #include "ota_update.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
+#include "config_manager.h"
 
 static const char *TAG = "APP_CTRL";
 
@@ -24,8 +25,8 @@ static const char *TAG = "APP_CTRL";
 #define SENSOR_TIMEOUT_MS        1500
 #define LED_DRV_CURRENT         0
 
-#define OTA_JSON_URL        "https://raw.githubusercontent.com/LManuXx/Waterly/main/waterly/version.json"
-#define CURRENT_FIRMWARE_VER 1
+#define OTA_JSON_URL_FALLBACK   "http://waterly.local:8000/firmware/version.json"
+#define CURRENT_FIRMWARE_VER    1
 
 // --- OBJETOS NEXTION ---
 // page0.t0  = Status (texto corto: lo que está haciendo el equipo)
@@ -77,18 +78,24 @@ static void ejecutar_ota() {
         as7265x_set_bulb_current(&sensor, 0, false);
     }
     
-    esp_err_t ret = check_and_update_firmware(OTA_JSON_URL, CURRENT_FIRMWARE_VER);
+    waterly_config_t cfg;
+    config_manager_get(&cfg);
+    const char *ota_url = (strlen(cfg.ota_url) > 0) ? cfg.ota_url : OTA_JSON_URL_FALLBACK;
+    
+    ESP_LOGI(TAG, "OTA URL: %s", ota_url);
+    
+    esp_err_t ret = check_and_update_firmware(ota_url, CURRENT_FIRMWARE_VER);
 
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "No había actualización o chequeo finalizado.");
+        ESP_LOGI(TAG, "No habia actualizacion o chequeo finalizado.");
         nextion_send_txt(NX_STATUS, "Sin updates");
+        current_state = STATE_IDLE;
     } else {
         ESP_LOGE(TAG, "Error en el proceso OTA");
         nextion_send_txt(NX_STATUS, "Update FALLO");
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        current_state = STATE_IDLE;
     }
-    
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    esp_restart();
 }
 
 static void tomar_medida_y_enviar() {

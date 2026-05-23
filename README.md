@@ -73,13 +73,13 @@ Los servicios arrancan en este orden: Mosquitto → ThingsBoard (espera healthy)
 | Mosquitto   | 1883   | Broker MQTT           |
 | InfluxDB    | 8086   | Base de datos         |
 | ThingsBoard | 8080   | Dashboard web         |
-| FastAPI     | 8000   | API REST              |
+| FastAPI     | 8000   | API REST + OTA        |
 
 ## Usar el Sistema
 
 ### Configuración del ESP32
 
-Todos los parámetros configurables (WiFi, MQTT, sensor, BLE) se almacenan en NVS.
+Todos los parámetros configurables (WiFi, MQTT, sensor, BLE, OTA) se almacenan en NVS.
 
 **Desde ThingsBoard** (widget de configuración):
 1. Importar el widget bundle: Widget Library → **+** → **Import** → `dashboards/waterly_custom_widgets.json`
@@ -92,12 +92,42 @@ Todos los parámetros configurables (WiFi, MQTT, sensor, BLE) se almacenan en NV
 mosquitto_pub -h <IP> -t "waterly/comandos" \
   -m '{"config":{"wifi_ssid":"MiRed","wifi_pass":"1234","sensor_gain":3}}'
 ```
-Claves soportadas: `wifi_ssid`, `wifi_pass`, `mqtt_broker`, `mqtt_topic_cmd`, `mqtt_topic_dat`, `sensor_gain`, `sensor_integration`, `sensor_led_current`, `ble_pop`, `factory_reset`.
+Claves soportadas: `wifi_ssid`, `wifi_pass`, `mqtt_broker`, `mqtt_topic_cmd`, `mqtt_topic_dat`, `sensor_gain`, `sensor_integration`, `sensor_led_current`, `ble_pop`, `ota_url`, `factory_reset`.
 
 **Factory Reset**: Borra toda la configuración y vuelve a estado de fábrica (inicia BLE provisioning).
 ```bash
 mosquitto_pub -h <IP> -t "waterly/comandos" -m '{"config":{"factory_reset":true}}'
 ```
+
+### Actualización OTA de Firmware
+
+El sistema soporta actualizaciones Over-The-Air directamente desde ThingsBoard.
+
+**Desde el widget "Firmware Upload"**:
+1. Compilar el firmware: `cd waterly && ./compile.sh`
+2. El binario se genera en `waterly/build/waterly.bin`
+3. Abrir el dashboard → widget "Firmware Upload"
+4. Seleccionar el archivo `.bin`
+5. Introducir un número de versión (debe ser mayor que la versión actual del ESP32, que empieza en 1)
+6. Pulsar **Subir y Actualizar**
+
+**Flujo automático**:
+- El widget sube el `.bin` al backend FastAPI (`POST /api/firmware/upload`)
+- El backend guarda el firmware y genera `version.json`
+- El backend envía automáticamente un comando OTA al ESP32 via MQTT
+- El ESP32 descarga el firmware via HTTP (`http://waterly.local:8000/firmware/waterly.bin`)
+- Se flashea en la partición OTA y reinicia
+
+**Vía curl** (alternativa):
+```bash
+curl -F "file=@waterly/build/waterly.bin" -F "version=2" http://localhost:8000/api/firmware/upload
+```
+
+**Requisitos**:
+- El ESP32 debe poder resolver `waterly.local` via mDNS (ya configurado por defecto)
+- El backend FastAPI debe estar corriendo (puerto 8000)
+- La URL OTA por defecto es `http://waterly.local:8000/firmware/version.json`
+- Se puede cambiar via MQTT: `{"config": {"ota_url": "http://mi-servidor/version.json"}}`
 
 ### Desde ThingsBoard (operación)
 
@@ -130,28 +160,37 @@ Botones disponibles: IDLE, SCAN (medida única), TRAIN (continuo), OTA, SLEEP, R
 │   │   ├── app_controller/     # Máquina de estados principal
 │   │   ├── as7265x/            # Driver del sensor espectral
 │   │   ├── config_manager/     # Gestión de configuración NVS
-│   │   ├── mqtt_app/           # Cliente MQTT + OTA config
+│   │   ├── mqtt_app/           # Cliente MQTT + config OTA
 │   │   ├── nextion/            # Driver pantalla Nextion
 │   │   ├── wifi/               # Conexión WiFi + BLE provisioning
-│   │   ├── ota/                # Actualizaciones OTA
+│   │   ├── ota/                # Actualizaciones OTA (HTTP manual)
 │   │   └── ssd1306/            # Driver OLED (opcional)
 │   └── compile.sh / flash.sh / monitor.sh
 │
 ├── waterly_server/             # Backend Python
 │   ├── backend/
-│   │   ├── main.py             # API + puente MQTT + state machine
+│   │   ├── main.py             # API + puente MQTT + state machine + OTA upload
 │   │   ├── brain.py            # Pipeline ML (calibración, entrenamiento, predicción)
 │   │   ├── test_brain.py       # Tests unitarios
 │   │   ├── .env.example        # Plantilla de variables de entorno
 │   │   └── Dockerfile
+│   ├── firmware/               # Firmware binario subido via OTA
 │   ├── mosquitto/              # Config broker MQTT
 │   ├── mdns_publisher/         # Servicio mDNS para descubrimiento
 │   └── docker-compose.yml
 │
 ├── dashboards/                 # Dashboards y widgets de ThingsBoard
 │   ├── nuevo_panel.json        # Dashboard principal (RPC buttons)
-│   ├── config_panel.html       # HTML del widget de configuración
-│   └── widget_js.js            # JavaScript del widget de configuración
+│   └── widget/
+│       ├── config_panel/       # Widget de configuración del ESP32
+│       │   ├── index.html
+│       │   ├── style.css
+│       │   └── script.js
+│       ├── firmware_upload/    # Widget de actualización OTA
+│       │   ├── index.html
+│       │   ├── style.css
+│       │   └── script.js
+│       └── configure_esp_widget.json
 ├── nextion_binary/             # Firmware pantalla Nextion (.tft)
 ├── start.sh / stop.sh / rebuild.sh / run_test.sh
 └── README.md

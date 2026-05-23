@@ -44,6 +44,7 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - waterly_model:/app/data/
+      - ./firmware:/app/firmware
 
     depends_on:
       mosquitto:

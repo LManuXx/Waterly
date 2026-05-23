@@ -1,0 +1,89 @@
+.config-panel {
+  font-family: 'Roboto', sans-serif;
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 20px;
+}
+.section {
+  margin-bottom: 20px;
+  padding: 15px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  background: #fafafa;
+}
+.section h3 {
+  margin-top: 0;
+  color: #1976D2;
+  border-bottom: 2px solid #1976D2;
+  padding-bottom: 8px;
+}
+.field {
+  margin-bottom: 12px;
+}
+.field label {
+  display: block;
+  font-weight: 500;
+  margin-bottom: 4px;
+  color: #424242;
+}
+.field input, .field select {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #bdbdbd;
+  border-radius: 4px;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+.field input:focus, .field select:focus {
+  outline: none;
+  border-color: #1976D2;
+  box-shadow: 0 0 0 2px rgba(25,118,210,0.2);
+}
+.buttons {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+}
+.btn {
+  flex: 1;
+  padding: 12px 20px;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-save {
+  background: #4CAF50;
+  color: white;
+}
+.btn-save:hover { background: #388E3C; }
+.btn-reset {
+  background: #f44336;
+  color: white;
+}
+.btn-reset:hover { background: #c62828; }
+.status {
+  margin-top: 15px;
+  padding: 10px;
+  border-radius: 4px;
+  display: none;
+}
+.status.success {
+  display: block;
+  background: #E8F5E9;
+  color: #2E7D32;
+  border: 1px solid #A5D6A7;
+}
+.status.error {
+  display: block;
+  background: #FFEBEE;
+  color: #C62828;
+  border: 1px solid #EF9A9A;
+}
+.hint {
+  font-size: 12px;
+  color: #757575;
+  margin-top: 4px;
+}

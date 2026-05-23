@@ -202,6 +202,16 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     }
                 }
                 
+                cJSON *j_ota_url = cJSON_GetObjectItem(item_config, "ota_url");
+                if (cJSON_IsString(j_ota_url)) {
+                    if (strcmp(cfg.ota_url, j_ota_url->valuestring) != 0) {
+                        strncpy(cfg.ota_url, j_ota_url->valuestring, sizeof(cfg.ota_url) - 1);
+                        cfg.ota_url[sizeof(cfg.ota_url) - 1] = '\0';
+                        changed = true;
+                        ESP_LOGI(TAG, "  OTA URL -> %s", cfg.ota_url);
+                    }
+                }
+                
                 cJSON *j_factory = cJSON_GetObjectItem(item_config, "factory_reset");
                 if (cJSON_IsBool(j_factory) && cJSON_IsTrue(j_factory)) {
                     ESP_LOGW(TAG, "FACTORY RESET solicitado via MQTT");

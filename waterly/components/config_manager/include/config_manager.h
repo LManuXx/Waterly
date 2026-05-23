@@ -32,7 +32,7 @@
 #define DEFAULT_NEXTION_TX   17
 #define DEFAULT_NEXTION_RX   16
 
-#define DEFAULT_OTA_URL "https://raw.githubusercontent.com/LManuXx/Waterly/main/waterly/version.json"
+#define DEFAULT_OTA_URL "http://waterly.local:8000/firmware/version.json"
 
 #define DEFAULT_TRAINING_INTERVAL_MS 3000
 #define DEFAULT_DEEP_SLEEP_MIN       1
