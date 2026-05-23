@@ -1,0 +1,142 @@
+{
+  "title": "Configuration Panel",
+  "image": null,
+  "mobileHide": false,
+  "mobileOrder": null,
+  "configuration": {
+    "description": "",
+    "widgets": {
+      "dbe6a359-7d9f-7e7a-2a4d-3ece7089673e": {
+        "typeFullFqn": "tenant.configure_esp",
+        "type": "rpc",
+        "sizeX": 12,
+        "sizeY": 8.5,
+        "config": {
+          "targetDeviceAliases": [],
+          "showTitle": true,
+          "backgroundColor": "#fff",
+          "color": "rgba(0, 0, 0, 0.87)",
+          "padding": "0px",
+          "settings": {
+            "parseGpioStatusFunction": "return body[pin] === true;",
+            "gpioStatusChangeRequest": {
+              "method": "setGpioStatus",
+              "paramsBody": "{\n   \"pin\": \"{$pin}\",\n   \"enabled\": \"{$enabled}\"\n}"
+            },
+            "requestTimeout": 500,
+            "switchPanelBackgroundColor": "#b71c1c",
+            "gpioStatusRequest": {
+              "method": "getGpioStatus",
+              "paramsBody": "{}"
+            },
+            "gpioList": [
+              {
+                "pin": 1,
+                "label": "GPIO 1",
+                "row": 0,
+                "col": 0,
+                "_uniqueKey": 0
+              },
+              {
+                "pin": 2,
+                "label": "GPIO 2",
+                "row": 0,
+                "col": 1,
+                "_uniqueKey": 1
+              },
+              {
+                "pin": 3,
+                "label": "GPIO 3",
+                "row": 1,
+                "col": 0,
+                "_uniqueKey": 2
+              }
+            ]
+          },
+          "title": "configure_esp",
+          "datasources": [],
+          "targetDevice": {
+            "type": "device",
+            "deviceId": "f87fdf80-f7b0-11f0-a245-bfcd116b6177"
+          }
+        },
+        "row": 0,
+        "col": 0,
+        "id": "dbe6a359-7d9f-7e7a-2a4d-3ece7089673e"
+      }
+    },
+    "states": {
+      "default": {
+        "name": "Configuration Panel",
+        "root": true,
+        "layouts": {
+          "main": {
+            "widgets": {
+              "dbe6a359-7d9f-7e7a-2a4d-3ece7089673e": {
+                "sizeX": 26,
+                "sizeY": 20,
+                "row": 0,
+                "col": 0
+              }
+            },
+            "gridSettings": {
+              "layoutType": "default",
+              "backgroundColor": "#eeeeee",
+              "columns": 24,
+              "margin": 10,
+              "outerMargin": true,
+              "backgroundSizeMode": "100%"
+            }
+          }
+        }
+      }
+    },
+    "entityAliases": {},
+    "filters": {},
+    "timewindow": {
+      "displayValue": "",
+      "hideAggregation": false,
+      "hideAggInterval": false,
+      "hideTimezone": false,
+      "selectedTab": 0,
+      "realtime": {
+        "realtimeType": 0,
+        "interval": 1000,
+        "timewindowMs": 60000,
+        "quickInterval": "CURRENT_DAY",
+        "hideInterval": false,
+        "hideLastInterval": false,
+        "hideQuickInterval": false
+      },
+      "history": {
+        "historyType": 0,
+        "interval": 1000,
+        "timewindowMs": 60000,
+        "fixedTimewindow": {
+          "startTimeMs": 1779462868328,
+          "endTimeMs": 1779549268328
+        },
+        "quickInterval": "CURRENT_DAY",
+        "hideInterval": false,
+        "hideLastInterval": false,
+        "hideFixedInterval": false,
+        "hideQuickInterval": false
+      },
+      "aggregation": {
+        "type": "AVG",
+        "limit": 25000
+      }
+    },
+    "settings": {
+      "stateControllerId": "entity",
+      "showTitle": false,
+      "showDashboardsSelect": true,
+      "showEntitiesSelect": true,
+      "showDashboardTimewindow": true,
+      "showDashboardExport": true,
+      "toolbarAlwaysOpen": true
+    }
+  },
+  "name": "Configuration Panel",
+  "resources": []
+}

@@ -8,7 +8,8 @@
 #include "nextion.h"
 
 // IMPRESCINDIBLE: Incluir el controlador para enviar eventos
-#include "app_controller.h" 
+#include "app_controller.h"
+#include "config_manager.h" 
 
 static const char *TAG = "MQTT_APP";
 esp_mqtt_client_handle_t client = NULL;
@@ -109,7 +110,115 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                 }
             }
 
-            // 2. CONTROL DE OTA (Independiente)
+            // 2. CONFIGURACION OTA (via MQTT)
+            cJSON *item_config = cJSON_GetObjectItem(root, "config");
+            if (cJSON_IsObject(item_config)) {
+                ESP_LOGI(TAG, "Recibida configuracion OTA via MQTT");
+                
+                waterly_config_t cfg;
+                config_manager_get(&cfg);
+                bool changed = false;
+                
+                cJSON *j_wifi_ssid = cJSON_GetObjectItem(item_config, "wifi_ssid");
+                if (cJSON_IsString(j_wifi_ssid) && strlen(j_wifi_ssid->valuestring) > 0) {
+                    if (strcmp(cfg.wifi_ssid, j_wifi_ssid->valuestring) != 0) {
+                        strncpy(cfg.wifi_ssid, j_wifi_ssid->valuestring, sizeof(cfg.wifi_ssid) - 1);
+                        cfg.wifi_ssid[sizeof(cfg.wifi_ssid) - 1] = '\0';
+                        changed = true;
+                        ESP_LOGI(TAG, "  WiFi SSID -> %s", cfg.wifi_ssid);
+                    }
+                }
+                
+                cJSON *j_wifi_pass = cJSON_GetObjectItem(item_config, "wifi_pass");
+                if (cJSON_IsString(j_wifi_pass)) {
+                    if (strcmp(cfg.wifi_pass, j_wifi_pass->valuestring) != 0) {
+                        strncpy(cfg.wifi_pass, j_wifi_pass->valuestring, sizeof(cfg.wifi_pass) - 1);
+                        cfg.wifi_pass[sizeof(cfg.wifi_pass) - 1] = '\0';
+                        changed = true;
+                    }
+                }
+                
+                cJSON *j_mqtt_broker = cJSON_GetObjectItem(item_config, "mqtt_broker");
+                if (cJSON_IsString(j_mqtt_broker)) {
+                    if (strcmp(cfg.mqtt_broker_ip, j_mqtt_broker->valuestring) != 0) {
+                        strncpy(cfg.mqtt_broker_ip, j_mqtt_broker->valuestring, sizeof(cfg.mqtt_broker_ip) - 1);
+                        cfg.mqtt_broker_ip[sizeof(cfg.mqtt_broker_ip) - 1] = '\0';
+                        changed = true;
+                        ESP_LOGI(TAG, "  MQTT Broker -> %s", cfg.mqtt_broker_ip);
+                    }
+                }
+                
+                cJSON *j_mqtt_cmd = cJSON_GetObjectItem(item_config, "mqtt_topic_cmd");
+                if (cJSON_IsString(j_mqtt_cmd)) {
+                    if (strcmp(cfg.mqtt_topic_cmd, j_mqtt_cmd->valuestring) != 0) {
+                        strncpy(cfg.mqtt_topic_cmd, j_mqtt_cmd->valuestring, sizeof(cfg.mqtt_topic_cmd) - 1);
+                        cfg.mqtt_topic_cmd[sizeof(cfg.mqtt_topic_cmd) - 1] = '\0';
+                        changed = true;
+                    }
+                }
+                
+                cJSON *j_mqtt_dat = cJSON_GetObjectItem(item_config, "mqtt_topic_dat");
+                if (cJSON_IsString(j_mqtt_dat)) {
+                    if (strcmp(cfg.mqtt_topic_dat, j_mqtt_dat->valuestring) != 0) {
+                        strncpy(cfg.mqtt_topic_dat, j_mqtt_dat->valuestring, sizeof(cfg.mqtt_topic_dat) - 1);
+                        cfg.mqtt_topic_dat[sizeof(cfg.mqtt_topic_dat) - 1] = '\0';
+                        changed = true;
+                    }
+                }
+                
+                cJSON *j_gain = cJSON_GetObjectItem(item_config, "sensor_gain");
+                if (cJSON_IsNumber(j_gain)) {
+                    if (cfg.sensor_gain != j_gain->valueint) {
+                        cfg.sensor_gain = j_gain->valueint;
+                        changed = true;
+                        ESP_LOGI(TAG, "  Sensor Gain -> %d", cfg.sensor_gain);
+                    }
+                }
+                
+                cJSON *j_integration = cJSON_GetObjectItem(item_config, "sensor_integration");
+                if (cJSON_IsNumber(j_integration)) {
+                    if (cfg.sensor_integration != j_integration->valueint) {
+                        cfg.sensor_integration = j_integration->valueint;
+                        changed = true;
+                        ESP_LOGI(TAG, "  Sensor Integration -> %d", cfg.sensor_integration);
+                    }
+                }
+                
+                cJSON *j_led = cJSON_GetObjectItem(item_config, "sensor_led_current");
+                if (cJSON_IsNumber(j_led)) {
+                    if (cfg.sensor_led_current != j_led->valueint) {
+                        cfg.sensor_led_current = j_led->valueint;
+                        changed = true;
+                        ESP_LOGI(TAG, "  Sensor LED Current -> %d", cfg.sensor_led_current);
+                    }
+                }
+                
+                cJSON *j_ble_pop = cJSON_GetObjectItem(item_config, "ble_pop");
+                if (cJSON_IsString(j_ble_pop)) {
+                    if (strcmp(cfg.ble_pop, j_ble_pop->valuestring) != 0) {
+                        strncpy(cfg.ble_pop, j_ble_pop->valuestring, sizeof(cfg.ble_pop) - 1);
+                        cfg.ble_pop[sizeof(cfg.ble_pop) - 1] = '\0';
+                        changed = true;
+                    }
+                }
+                
+                cJSON *j_factory = cJSON_GetObjectItem(item_config, "factory_reset");
+                if (cJSON_IsBool(j_factory) && cJSON_IsTrue(j_factory)) {
+                    ESP_LOGW(TAG, "FACTORY RESET solicitado via MQTT");
+                    config_manager_factory_reset();
+                    return;
+                }
+                
+                if (changed) {
+                    ESP_LOGI(TAG, "Guardando configuracion y reiniciando...");
+                    nextion_send_txt("page0.t0", "Config OK, reboot...");
+                    config_manager_set(&cfg, true);
+                } else {
+                    ESP_LOGI(TAG, "Configuracion recibida pero sin cambios (ignorada)");
+                }
+            }
+
+            // 3. CONTROL DE OTA (Independiente)
             cJSON *item_update = cJSON_GetObjectItem(root, "update");
             if (cJSON_IsBool(item_update) && cJSON_IsTrue(item_update)) {
                 app_controller_send_event(APP_EVENT_START_OTA);

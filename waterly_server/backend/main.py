@@ -425,6 +425,35 @@ def on_tb_message(client, userdata, msg):
             client_tb.publish("v1/devices/me/telemetry", json.dumps({"prediction_status": json.dumps(info)}))
             return
 
+        elif method == "saveConfig":
+            # Configuracion OTA del ESP32 desde ThingsBoard
+            if not params:
+                client_tb.publish(f"v1/devices/me/rpc/response/{rpc_id}", json.dumps({"result": "error: no params"}))
+                print("[CONFIG] saveConfig sin parametros")
+                return
+            
+            config_payload = {"config": params}
+            client_mosquitto.publish("waterly/comandos", json.dumps(config_payload), qos=1, retain=False)
+            
+            # Responder inmediatamente a ThingsBoard para evitar timeout
+            client_tb.publish(f"v1/devices/me/rpc/response/{rpc_id}", json.dumps({"result": "Config enviada al ESP32. Reiniciando..."}))
+            client_tb.publish("v1/devices/me/telemetry", json.dumps({
+                "prediction_status": f"Configuracion enviada al ESP32. Reiniciando..."
+            }))
+            print(f"[CONFIG] saveConfig enviado al ESP32: {params}")
+            return
+
+        elif method == "factoryReset":
+            # Factory reset del ESP32
+            reset_payload = {"config": {"factory_reset": True}}
+            client_mosquitto.publish("waterly/comandos", json.dumps(reset_payload), qos=1, retain=False)
+            client_tb.publish(f"v1/devices/me/rpc/response/{rpc_id}", json.dumps({"result": "Factory reset enviado"}))
+            client_tb.publish("v1/devices/me/telemetry", json.dumps({
+                "prediction_status": "Factory Reset enviado al ESP32"
+            }))
+            print("[CONFIG] Factory Reset enviado al ESP32")
+            return
+
         if esp_payload:
             client_mosquitto.publish("waterly/comandos", json.dumps(esp_payload), retain=should_retain)
             client_tb.publish(f"v1/devices/me/rpc/response/{rpc_id}", json.dumps({"result": "ok"}))

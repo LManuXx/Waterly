@@ -77,7 +77,29 @@ Los servicios arrancan en este orden: Mosquitto → ThingsBoard (espera healthy)
 
 ## Usar el Sistema
 
-### Desde ThingsBoard
+### Configuración del ESP32
+
+Todos los parámetros configurables (WiFi, MQTT, sensor, BLE) se almacenan en NVS.
+
+**Desde ThingsBoard** (widget de configuración):
+1. Importar el widget bundle: Widget Library → **+** → **Import** → `dashboards/waterly_custom_widgets.json`
+2. Importar el dashboard: Dashboards → **+** → **Import** → `dashboards/waterly_config_dashboard.json`
+3. Abrir el dashboard → Edit → pestaña **Data** → añadir dispositivo `Waterly_ESP32`
+4. Rellenar solo los campos que quieras cambiar → **Guardar y Reiniciar**
+
+**Vía MQTT** (manual):
+```bash
+mosquitto_pub -h <IP> -t "waterly/comandos" \
+  -m '{"config":{"wifi_ssid":"MiRed","wifi_pass":"1234","sensor_gain":3}}'
+```
+Claves soportadas: `wifi_ssid`, `wifi_pass`, `mqtt_broker`, `mqtt_topic_cmd`, `mqtt_topic_dat`, `sensor_gain`, `sensor_integration`, `sensor_led_current`, `ble_pop`, `factory_reset`.
+
+**Factory Reset**: Borra toda la configuración y vuelve a estado de fábrica (inicia BLE provisioning).
+```bash
+mosquitto_pub -h <IP> -t "waterly/comandos" -m '{"config":{"factory_reset":true}}'
+```
+
+### Desde ThingsBoard (operación)
 
 1. **Calibrar**: Colocar agua limpia → botón `calibrate` en dashboard.
 2. **Entrenar**: Preparar muestra con nitratos conocidos → botón `startTraining` con etiqueta (ej: "10.0").
@@ -107,7 +129,8 @@ Botones disponibles: IDLE, SCAN (medida única), TRAIN (continuo), OTA, SLEEP, R
 │   ├── components/
 │   │   ├── app_controller/     # Máquina de estados principal
 │   │   ├── as7265x/            # Driver del sensor espectral
-│   │   ├── mqtt_app/           # Cliente MQTT
+│   │   ├── config_manager/     # Gestión de configuración NVS
+│   │   ├── mqtt_app/           # Cliente MQTT + OTA config
 │   │   ├── nextion/            # Driver pantalla Nextion
 │   │   ├── wifi/               # Conexión WiFi + BLE provisioning
 │   │   ├── ota/                # Actualizaciones OTA
@@ -119,12 +142,16 @@ Botones disponibles: IDLE, SCAN (medida única), TRAIN (continuo), OTA, SLEEP, R
 │   │   ├── main.py             # API + puente MQTT + state machine
 │   │   ├── brain.py            # Pipeline ML (calibración, entrenamiento, predicción)
 │   │   ├── test_brain.py       # Tests unitarios
+│   │   ├── .env.example        # Plantilla de variables de entorno
 │   │   └── Dockerfile
 │   ├── mosquitto/              # Config broker MQTT
 │   ├── mdns_publisher/         # Servicio mDNS para descubrimiento
 │   └── docker-compose.yml
 │
-├── dashboards/                 # Dashboards de ThingsBoard (JSON)
+├── dashboards/                 # Dashboards y widgets de ThingsBoard
+│   ├── nuevo_panel.json        # Dashboard principal (RPC buttons)
+│   ├── config_panel.html       # HTML del widget de configuración
+│   └── widget_js.js            # JavaScript del widget de configuración
 ├── nextion_binary/             # Firmware pantalla Nextion (.tft)
 ├── start.sh / stop.sh / rebuild.sh / run_test.sh
 └── README.md
