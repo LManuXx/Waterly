@@ -7,7 +7,7 @@ import requests
 import shutil
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import ASYNCHRONOUS
@@ -588,3 +588,66 @@ async def upload_firmware(file: UploadFile = File(...), version: int = Form(...)
     return {"status": "ok", "version": version, "size": file_size}
 
 app.mount("/firmware", StaticFiles(directory=FIRMWARE_DIR), name="firmware")
+
+MODEL_FILE_PATH = "/app/data/waterly_model.pkl"
+
+@app.get("/api/model/info")
+def get_model_info():
+    info = brain.get_model_info()
+    info["is_trained"] = brain.is_trained
+    info["model_type"] = brain.model_type
+    info["has_baseline"] = brain.baseline is not None
+    info["n_samples"] = len(brain.dataset_X)
+    return info
+
+@app.get("/api/model/download")
+def download_model():
+    if not os.path.exists(MODEL_FILE_PATH):
+        raise HTTPException(status_code=404, detail="No hay modelo guardado. Entrena un modelo primero.")
+    return FileResponse(
+        MODEL_FILE_PATH,
+        media_type="application/octet-stream",
+        filename="waterly_model.pkl"
+    )
+
+@app.post("/api/model/upload")
+async def upload_model(file: UploadFile = File(...)):
+    import joblib
+    
+    if not file.filename or not file.filename.endswith(".pkl"):
+        raise HTTPException(status_code=400, detail="Solo se aceptan archivos .pkl")
+    
+    content = await file.read()
+    
+    try:
+        import io
+        state = joblib.load(io.BytesIO(content))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Archivo .pkl invalido o corrupto: {str(e)}")
+    
+    required_keys = ["baseline", "trained", "scaler", "model_type"]
+    for key in required_keys:
+        if key not in state:
+            raise HTTPException(status_code=400, detail=f"Modelo invalido: falta la clave '{key}'")
+    
+    if state["trained"]:
+        if state["scaler"] is None:
+            raise HTTPException(status_code=400, detail="Modelo invalido: scaler es nulo en modelo entrenado")
+        if state["model_type"] == "PLSR" and state.get("model") is None:
+            raise HTTPException(status_code=400, detail="Modelo invalido: falta el modelo PLSR")
+    
+    with open(MODEL_FILE_PATH, "wb") as f:
+        f.write(content)
+    
+    brain.load_brain()
+    
+    info = brain.get_model_info()
+    print(f"[MODEL] Modelo cargado: tipo={state['model_type']}, trained={state['trained']}, baseline={'SI' if state['baseline'] is not None else 'NO'}")
+    
+    return {
+        "status": "ok",
+        "model_type": state["model_type"],
+        "trained": state["trained"],
+        "has_baseline": state["baseline"] is not None,
+        "metrics": info if state["trained"] else {}
+    }

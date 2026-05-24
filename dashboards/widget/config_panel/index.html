@@ -60,6 +60,41 @@
   </div>
 
   <div class="section">
+    <h3>Modelo ML</h3>
+    <div id="modelInfo" class="model-info">
+      <div class="model-row">
+        <span class="model-label">Estado:</span>
+        <span id="modelStatus" class="model-value">Cargando...</span>
+      </div>
+      <div class="model-row">
+        <span class="model-label">Tipo:</span>
+        <span id="modelType" class="model-value">-</span>
+      </div>
+      <div class="model-row">
+        <span class="model-label">Baseline:</span>
+        <span id="modelBaseline" class="model-value">-</span>
+      </div>
+      <div class="model-row">
+        <span class="model-label">Muestras:</span>
+        <span id="modelSamples" class="model-value">-</span>
+      </div>
+      <div class="model-row" id="modelMetricsRow" style="display:none;">
+        <span class="model-label">Metricas:</span>
+        <span id="modelMetrics" class="model-value">-</span>
+      </div>
+    </div>
+    <div class="model-actions">
+      <button class="btn btn-download" id="btn-download">Descargar Modelo</button>
+      <button class="btn btn-upload-model" id="btn-upload-model">Cargar Modelo</button>
+    </div>
+    <div class="field" id="modelUploadField" style="display:none;">
+      <label for="modelFile">Seleccionar archivo .pkl</label>
+      <input type="file" id="modelFile" accept=".pkl">
+      <div id="modelFileInfo" class="file-info" style="display:none;"></div>
+    </div>
+  </div>
+
+  <div class="section">
     <h3>BLE Provisioning</h3>
     <div class="field">
       <label for="ble_pop">POP Password</label>
