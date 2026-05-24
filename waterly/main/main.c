@@ -7,6 +7,7 @@
 #include "mqtt_app.h"
 #include "app_controller.h" 
 #include "nextion.h" 
+#include "config_manager.h" 
 
 static const char *TAG = "MAIN";
 
@@ -33,13 +34,12 @@ void actualizar_carga(int porcentaje, const char* texto) {
 
 void app_main(void)
 {
-    // 1. INICIALIZACIÓN DEL SISTEMA
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+    // 1. INICIALIZAR CONFIG MANAGER (incluye NVS)
+    if (config_manager_init() == ESP_OK) {
+        ESP_LOGI(TAG, "Config Manager: OK");
+    } else {
+        ESP_LOGE(TAG, "Config Manager: FAIL");
     }
-    ESP_ERROR_CHECK(ret);
 
     ESP_LOGI(TAG, "Arrancando Waterly Modular...");
 

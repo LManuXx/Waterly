@@ -95,10 +95,31 @@
   </div>
 
   <div class="section">
+    <h3>OTA</h3>
+    <div class="field">
+      <label for="ota_url">Version URL</label>
+      <input type="text" id="ota_url" placeholder="http://waterly.local:8000/firmware/version.json">
+    </div>
+  </div>
+
+  <div class="section">
     <h3>BLE Provisioning</h3>
     <div class="field">
       <label for="ble_pop">POP Password</label>
       <input type="text" id="ble_pop" placeholder="No cambiar">
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Configuracion</h3>
+    <div class="config-actions">
+      <button class="btn btn-download-config" id="btn-download-config">Descargar Config</button>
+      <button class="btn btn-upload-config" id="btn-upload-config">Cargar Config</button>
+    </div>
+    <div class="field" id="configUploadField" style="display:none;">
+      <label for="configFile">Seleccionar archivo .json</label>
+      <input type="file" id="configFile" accept=".json">
+      <div id="configFileInfo" class="file-info" style="display:none;"></div>
     </div>
   </div>
 

@@ -7,7 +7,7 @@ import requests
 import shutil
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import ASYNCHRONOUS
@@ -45,6 +45,7 @@ BURST_CONTEXT = {
 }
 BURST_TIMER = None
 BURST_TIMEOUT_S = 20
+CURRENT_CONFIG = {}
 
 FIRMWARE_DIR = "/app/firmware"
 FIRMWARE_BIN = os.path.join(FIRMWARE_DIR, "waterly.bin")
@@ -210,7 +211,16 @@ def send_telemetry(raw_data, abs_data=None, is_calibrated=False, prediction_stat
 
 
 def on_mosquitto_message(client, userdata, msg):
-    global CURRENT_STATE, BURST_CONTEXT, BURST_TIMER
+    global CURRENT_STATE, BURST_CONTEXT, BURST_TIMER, CURRENT_CONFIG
+
+    # Configuracion del ESP32 (topic separado)
+    if msg.topic == "waterly/config":
+        try:
+            CURRENT_CONFIG = json.loads(msg.payload.decode("utf-8", errors="ignore"))
+            print(f"[CONFIG] Config actualizada desde ESP32: SSID={CURRENT_CONFIG.get('wifi_ssid', '?')}")
+        except Exception as e:
+            print(f"[CONFIG] Error parseando config: {e}")
+        return
 
     try:
         raw_payload = msg.payload.decode()
@@ -309,6 +319,10 @@ def on_mosquitto_message(client, userdata, msg):
     except Exception as e:
         print(f"Error en bucle principal: {e}")
 
+KNOWN_RPC_METHODS = {"setIdle", "startFreeMeasure", "calibrate", "startTraining", "startAnalysis",
+                     "trainModel", "resetModel", "setModeDeviation", "setModePLSR", "getModelInfo",
+                     "saveConfig", "factoryReset", "updateFirmware"}
+
 # --- PUENTE MQTT (NUBE -> ESP32) ---
 def on_tb_message(client, userdata, msg):
     global CURRENT_STATE, BURST_CONTEXT, BURST_TIMER
@@ -318,6 +332,16 @@ def on_tb_message(client, userdata, msg):
         method = data.get("method")
         params = data.get("params")
         rpc_id = msg.topic.split("/")[-1] if "/" in msg.topic else "0"
+
+        # Detectar si ThingsBoard envio los campos invertidos (method=deviceId, params=methodName)
+        # Esto pasa cuando el widget usa sendOneWayCommand en lugar de fetch directo
+        if method and "-" in method and isinstance(params, str) and params in KNOWN_RPC_METHODS:
+            actual_method = params
+            # Los params reales pueden estar en otro lado o perdidos
+            # Si params era un string (el nombre del metodo), los params reales se perdieron
+            method = actual_method
+            params = {}
+            print(f"[RPC] Campos invertidos detectados (controlApi), corrigiendo: method={method}")
 
         esp_payload = None
         should_retain = False
@@ -512,6 +536,7 @@ def start_bridge():
         if rc == 0:
             print("[MQTT] Mosquitto conectado")
             client_mosquitto.subscribe("waterly/datos")
+            client_mosquitto.subscribe("waterly/config")
         else:
             print(f"[MQTT] Error conexión Mosquitto: {rc}")
 
@@ -651,3 +676,76 @@ async def upload_model(file: UploadFile = File(...)):
         "has_baseline": state["baseline"] is not None,
         "metrics": info if state["trained"] else {}
     }
+
+@app.get("/api/config/current")
+def get_current_config():
+    if not CURRENT_CONFIG:
+        return JSONResponse(status_code=404, content={"error": "ESP32 no ha enviado config aun"})
+    return CURRENT_CONFIG
+
+GAIN_LABELS = {0: "1x (bajo)", 1: "4x (medio-bajo)", 2: "16x (medio-alto)", 3: "64x (alto)"}
+LED_LABELS = {0: "12.5mA (bajo)", 1: "25mA (medio)", 2: "50mA (alto)", 3: "100mA (maximo)"}
+
+def _add_readable_labels(config):
+    readable = {}
+    if "sensor_gain" in config:
+        readable["sensor_gain"] = GAIN_LABELS.get(config["sensor_gain"], f"Desconocido ({config['sensor_gain']})")
+    if "sensor_integration" in config:
+        ms = config["sensor_integration"] * 2.8
+        readable["sensor_integration"] = f"{ms:.0f}ms ({config['sensor_integration']} x 2.8ms)"
+    if "sensor_led_current" in config:
+        readable["sensor_led_current"] = LED_LABELS.get(config["sensor_led_current"], f"Desconocido ({config['sensor_led_current']})")
+    return readable
+
+@app.get("/api/config/download")
+def download_config():
+    if not CURRENT_CONFIG:
+        raise HTTPException(status_code=404, detail="ESP32 no ha enviado config aun. Espera a que se conecte a MQTT.")
+    import io
+    config_with_labels = dict(CURRENT_CONFIG)
+    config_with_labels["_readable"] = _add_readable_labels(CURRENT_CONFIG)
+    config_bytes = json.dumps(config_with_labels, indent=2, ensure_ascii=False).encode("utf-8")
+    return StreamingResponse(
+        io.BytesIO(config_bytes),
+        media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=waterly_config.json"}
+    )
+
+@app.post("/api/config/upload")
+async def upload_config(file: UploadFile = File(...)):
+    if not file.filename or not file.filename.endswith(".json"):
+        raise HTTPException(status_code=400, detail="Solo se aceptan archivos .json")
+    
+    content = await file.read()
+    
+    try:
+        config_data = json.loads(content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"JSON invalido: {str(e)}")
+    
+    valid_keys = {"wifi_ssid", "wifi_pass", "mqtt_broker", "mqtt_topic_cmd", "mqtt_topic_dat",
+                  "sensor_gain", "sensor_integration", "sensor_led_current", "ble_pop", "ota_url"}
+    
+    sent_keys = set(config_data.keys()) & valid_keys
+    if not sent_keys:
+        raise HTTPException(status_code=400, detail="El JSON no contiene ninguna clave de configuracion valida")
+    
+    filtered_config = {k: v for k, v in config_data.items() if k in valid_keys}
+    
+    config_payload = {"config": filtered_config}
+    client_mosquitto.publish("waterly/comandos", json.dumps(config_payload), qos=1, retain=False)
+    
+    print(f"[CONFIG] Config cargada desde JSON, enviando al ESP32: {list(sent_keys)}")
+    
+    return {
+        "status": "ok",
+        "keys_sent": list(sent_keys),
+        "message": f"Configuracion enviada al ESP32 ({len(sent_keys)} parametros)"
+    }
+
+@app.post("/api/config/factory_reset")
+def factory_reset_config():
+    reset_payload = {"config": {"factory_reset": True}}
+    client_mosquitto.publish("waterly/comandos", json.dumps(reset_payload), qos=1, retain=False)
+    print("[CONFIG] Factory Reset enviado al ESP32 via API directa")
+    return {"status": "ok", "message": "Factory Reset enviado al ESP32"}

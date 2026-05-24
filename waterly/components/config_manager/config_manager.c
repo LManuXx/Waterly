@@ -48,7 +48,10 @@ esp_err_t config_manager_init(void) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
-    ESP_ERROR_CHECK(ret);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Error inicializando NVS: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
     nvs_handle_t nvs;
     ret = nvs_open(CONFIG_NAMESPACE, NVS_READONLY, &nvs);

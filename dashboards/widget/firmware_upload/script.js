@@ -88,15 +88,16 @@ self.onInit = function() {
     });
     
     function sendRPC(method, params, callback) {
-        var sub = self.ctx.defaultSubscription;
-        var entityId = sub.entityId;
-        var deviceId = (typeof entityId === 'string') ? entityId : entityId.id;
-        
-        self.ctx.controlApi.sendOneWayCommand(deviceId, method, params, 5000).then(function() {
-            callback(true, null);
-        }).catch(function(err) {
-            callback(false, err.message || err);
-        });
+        self.ctx.controlApi.sendOneWayCommand(method, params, 5000)
+            .subscribe(
+                function() {
+                    self.ctx.controlApi.completedCommand();
+                    callback(true, null);
+                },
+                function(err) {
+                    callback(false, err.message || err);
+                }
+            );
     }
     
     function resetUI() {

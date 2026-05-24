@@ -64,6 +64,37 @@
   color: white;
 }
 .btn-reset:hover { background: #c62828; }
+.config-actions {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.btn-download-config {
+  flex: 1;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  background: #FF9800;
+  color: white;
+  transition: all 0.2s;
+}
+.btn-download-config:hover { background: #F57C00; }
+.btn-upload-config {
+  flex: 1;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  background: #9C27B0;
+  color: white;
+  transition: all 0.2s;
+}
+.btn-upload-config:hover { background: #7B1FA2; }
 .status {
   margin-top: 15px;
   padding: 10px;

@@ -72,6 +72,34 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(TAG, "MQTT Conectado! Suscribiendo...");
         nextion_send_txt("page0.t0", "MQTT OK");
         esp_mqtt_client_subscribe(client, "waterly/comandos", 0);
+        
+        // Publicar configuracion actual al broker (retain=True para que el backend la reciba al reconectar)
+        {
+            waterly_config_t cfg;
+            esp_err_t ret = config_manager_get(&cfg);
+            if (ret == ESP_OK) {
+                cJSON *config_json = cJSON_CreateObject();
+                cJSON_AddStringToObject(config_json, "wifi_ssid", cfg.wifi_ssid);
+                cJSON_AddStringToObject(config_json, "mqtt_broker", cfg.mqtt_broker_ip);
+                cJSON_AddNumberToObject(config_json, "sensor_gain", cfg.sensor_gain);
+                cJSON_AddNumberToObject(config_json, "sensor_integration", cfg.sensor_integration);
+                cJSON_AddNumberToObject(config_json, "sensor_led_current", cfg.sensor_led_current);
+                cJSON_AddStringToObject(config_json, "ble_pop", cfg.ble_pop);
+                cJSON_AddStringToObject(config_json, "ota_url", cfg.ota_url);
+                cJSON_AddStringToObject(config_json, "mqtt_topic_cmd", cfg.mqtt_topic_cmd);
+                cJSON_AddStringToObject(config_json, "mqtt_topic_dat", cfg.mqtt_topic_dat);
+                
+                char *json_str = cJSON_PrintUnformatted(config_json);
+                if (json_str) {
+                    esp_mqtt_client_publish(client, "waterly/config", json_str, 0, 1, true);
+                    ESP_LOGI(TAG, "Configuracion publicada a waterly/config");
+                    free(json_str);
+                }
+                cJSON_Delete(config_json);
+            } else {
+                ESP_LOGW(TAG, "No se pudo leer config (err=%d), omitiendo publish", ret);
+            }
+        }
         break;
 
     case MQTT_EVENT_DISCONNECTED:
