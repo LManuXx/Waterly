@@ -58,8 +58,17 @@ waterly_server/
 ## Comandos
 
 ```bash
-./start.sh      # docker compose up -d
+./start.sh      # docker compose up -d --build (sin ThingsBoard)
 ./stop.sh       # docker compose down
-./rebuild.sh    # docker compose down && docker compose up -d --build
+./rebuild.sh    # rebuild + up
 ./run_test.sh   # Ejecutar tests
+```
+
+Panel web: **http://localhost:3000**  
+API: **http://localhost:8000**
+
+ThingsBoard opt-in:
+```bash
+cd waterly_server
+COMPOSE_PROFILES=thingsboard TB_ENABLED=true docker compose up -d
 ```

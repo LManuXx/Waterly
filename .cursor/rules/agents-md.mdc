@@ -1,0 +1,11 @@
+---
+description: AGENTS.md es local (gitignored); actualizar si la arquitectura cambia
+alwaysApply: true
+---
+
+# AGENTS.md — local, no GitHub
+
+- [`AGENTS.md`](AGENTS.md) está en **`.gitignore`**: no incluirlo en commits ni PRs.
+- **Sí mantenerlo al día** cuando cambie arquitectura, ML, pestañas UI o comandos RPC (mapa útil para agentes).
+- Si el usuario pide que no se toque en un momento concreto, respetarlo.
+- No regenerar desde cero sin necesidad: actualizar secciones afectadas.

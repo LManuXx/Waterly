@@ -1,5 +1,6 @@
 #include "as7265x.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h> // Para memcpy
@@ -41,32 +42,32 @@ static esp_err_t write_phy_reg(as7265x_handle_t *handle, uint8_t reg, uint8_t va
 }
 
 // --------------------------------------------------------------------------
-// GESTOR DE REGISTROS VIRTUALES
+// GESTOR DE REGISTROS VIRTUALES (OPTIMIZADO CON MICRO-DELAY)
 // --------------------------------------------------------------------------
 
 static esp_err_t virtual_write(as7265x_handle_t *handle, uint8_t virtual_reg, uint8_t value) {
     uint8_t status;
     int retries;
 
-    // 1. Esperar TX libre
-    retries = 50;
+    // 1. Esperar TX libre (sondeo rápido en us)
+    retries = 100;
     while (1) {
         if (read_phy_reg(handle, I2C_SLAVE_STATUS_REG, &status) != ESP_OK) return ESP_FAIL;
         if ((status & STATUS_TX_VALID) == 0) break;
         if (--retries == 0) return ESP_ERR_TIMEOUT;
-        vTaskDelay(pdMS_TO_TICKS(2));
+        esp_rom_delay_us(50);
     }
 
     // 2. Enviar dirección (MSB=1 para write)
     if (write_phy_reg(handle, I2C_SLAVE_WRITE_REG, (virtual_reg | 0x80)) != ESP_OK) return ESP_FAIL;
 
     // 3. Esperar TX libre
-    retries = 50;
+    retries = 100;
     while (1) {
         if (read_phy_reg(handle, I2C_SLAVE_STATUS_REG, &status) != ESP_OK) return ESP_FAIL;
         if ((status & STATUS_TX_VALID) == 0) break;
         if (--retries == 0) return ESP_ERR_TIMEOUT;
-        vTaskDelay(pdMS_TO_TICKS(2));
+        esp_rom_delay_us(50);
     }
 
     // 4. Escribir valor
@@ -78,24 +79,24 @@ static esp_err_t virtual_read(as7265x_handle_t *handle, uint8_t virtual_reg, uin
     int retries;
 
     // 1. Esperar TX libre
-    retries = 50;
+    retries = 100;
     while (1) {
         if (read_phy_reg(handle, I2C_SLAVE_STATUS_REG, &status) != ESP_OK) return ESP_FAIL;
         if ((status & STATUS_TX_VALID) == 0) break;
         if (--retries == 0) return ESP_ERR_TIMEOUT;
-        vTaskDelay(pdMS_TO_TICKS(2));
+        esp_rom_delay_us(50);
     }
 
     // 2. Enviar dirección (MSB=0 para read)
     if (write_phy_reg(handle, I2C_SLAVE_WRITE_REG, virtual_reg) != ESP_OK) return ESP_FAIL;
 
     // 3. Esperar RX valida
-    retries = 50;
+    retries = 100;
     while (1) {
         if (read_phy_reg(handle, I2C_SLAVE_STATUS_REG, &status) != ESP_OK) return ESP_FAIL;
         if ((status & STATUS_RX_VALID) != 0) break;
         if (--retries == 0) return ESP_ERR_TIMEOUT;
-        vTaskDelay(pdMS_TO_TICKS(2));
+        esp_rom_delay_us(50);
     }
 
     // 4. Leer dato
@@ -210,9 +211,10 @@ esp_err_t as7265x_set_config(as7265x_handle_t *handle, as7265x_mode_t mode, as72
     uint8_t current_val;
     if (virtual_read(handle, VIRT_CONFIG, &current_val) != ESP_OK) return ESP_FAIL;
     
-    current_val &= ~(0b00111100); 
-    current_val |= (mode << 2);
-    current_val |= (gain << 4);
+    /* Limpiar DATA_RDY + mode + gain para forzar una integración nueva */
+    current_val &= (uint8_t)~(0b00111110);
+    current_val |= (uint8_t)(mode << 2);
+    current_val |= (uint8_t)(gain << 4);
     
     return virtual_write(handle, VIRT_CONFIG, current_val);
 }
@@ -222,27 +224,24 @@ esp_err_t as7265x_set_integration_time(as7265x_handle_t *handle, uint8_t value) 
 }
 
 esp_err_t as7265x_set_bulb_current(as7265x_handle_t *handle, uint8_t current_code, bool enable) {
-    // Recorremos los 3 sensores: 0=Master, 1=Slave1, 2=Slave2
+    /* Los 3 chips (NIR/VIS/UV) tienen LED_CONFIG propio vía DEV_SEL.
+     * Encenderlos en bucle es inevitable por I2C, pero sin delays entre chips
+     * para que visualmente queden ON casi a la vez. */
+    current_code &= 0x03;
+
     for (uint8_t dev = 0; dev < 3; dev++) {
-        
-        // 1. Seleccionamos el dispositivo (NIR, VIS o UV)
         if (virtual_write(handle, VIRT_DEV_SEL, dev) != ESP_OK) return ESP_FAIL;
 
-        // 2. Leemos su configuración actual
         uint8_t led_cfg;
         if (virtual_read(handle, VIRT_LED_CONFIG, &led_cfg) != ESP_OK) return ESP_FAIL;
 
-        // 3. Modificamos los bits del LED
-        // Bit 3: Enable Bulb
-        // Bits 4-5: Corriente (12.5mA, 25mA, 50mA, 100mA)
-        led_cfg &= ~(0b00111000); // Limpiamos bits anteriores (3, 4 y 5)
-        
+        /* Bit 3: bulb enable; bits 4-5: current. No tocar indicator (bits 0-2). */
+        led_cfg &= (uint8_t)~0x38;
         if (enable) {
-            led_cfg |= (1 << 3);            // Activamos Bit 3
-            led_cfg |= (current_code << 4); // Ponemos corriente en Bits 4-5
+            led_cfg |= (uint8_t)(1u << 3);
+            led_cfg |= (uint8_t)(current_code << 4);
         }
 
-        // 4. Escribimos la configuración de vuelta
         if (virtual_write(handle, VIRT_LED_CONFIG, led_cfg) != ESP_OK) return ESP_FAIL;
     }
 

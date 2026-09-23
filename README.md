@@ -70,10 +70,11 @@ Los servicios arrancan en este orden: Mosquitto → ThingsBoard (espera healthy)
 
 | Servicio    | Puerto | Descripción           |
 |-------------|--------|-----------------------|
+| Panel web   | 3000   | UI React (nginx)      |
 | Mosquitto   | 1883   | Broker MQTT           |
 | InfluxDB    | 8086   | Base de datos         |
-| ThingsBoard | 8080   | Dashboard web         |
-| FastAPI     | 8000   | API REST + OTA        |
+| FastAPI     | 8000   | API REST + WS + OTA   |
+| ThingsBoard | 8080   | Solo con profile TB   |
 
 ## Usar el Sistema
 
@@ -199,6 +200,17 @@ Botones disponibles: IDLE, SCAN (medida única), TRAIN (continuo), OTA, SLEEP, R
 ## Flujo de Comunicación
 
 ```
-ThingsBoard RPC → Python API (main.py) → Mosquitto → ESP32 → AS7265x
-ESP32 → MQTT (waterly/datos) → Python API → InfluxDB + ThingsBoard telemetry
+Panel web / TB RPC → Python API (main.py) → Mosquitto → ESP32 → AS7265x
+ESP32 → MQTT (waterly/datos) → Python API → InfluxDB + WebSocket (+ TB si TB_ENABLED)
+```
+
+## Panel web
+
+Tras `./start.sh`, abre **http://localhost:3000** (Operación, Histórico, Config, Firmware, Modelo).
+
+ThingsBoard no arranca por defecto. Opt-in:
+
+```bash
+cd waterly_server
+COMPOSE_PROFILES=thingsboard TB_ENABLED=true docker compose up -d
 ```

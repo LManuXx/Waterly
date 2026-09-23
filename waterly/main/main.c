@@ -17,8 +17,11 @@ static const char *TAG = "MAIN";
 #define I2C_MASTER_NUM              I2C_NUM_0
 #define I2C_MASTER_FREQ_HZ          100000 
 
-// Función auxiliar para actualizar barra de carga
+// Función auxiliar para actualizar barra de carga (Nextion; no-op si está deshabilitada)
 void actualizar_carga(int porcentaje, const char* texto) {
+    ESP_LOGI(TAG, "Boot [%d%%] %s", porcentaje, texto ? texto : "");
+
+#if WATERLY_NEXTION_ENABLED
     char cmd[30];
     
     // 1. Actualizar texto de status
@@ -30,6 +33,10 @@ void actualizar_carga(int porcentaje, const char* texto) {
     
     // Pequeño delay para que el ojo humano vea el cambio
     vTaskDelay(pdMS_TO_TICKS(50));
+#else
+    (void)porcentaje;
+    (void)texto;
+#endif
 }
 
 void app_main(void)
@@ -57,6 +64,7 @@ void app_main(void)
     ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0));
 
     // 3. INICIAR PANTALLA NEXTION
+#if WATERLY_NEXTION_ENABLED
     if (nextion_init() == ESP_OK) {
         ESP_LOGI(TAG, "Nextion UART: OK");
         
@@ -86,6 +94,12 @@ void app_main(void)
     } else {
         ESP_LOGE(TAG, "Nextion UART: FAIL");
     }
+#else
+    // TEMPORAL: Nextion desconectada — stub (ver WATERLY_NEXTION_ENABLED en nextion.h)
+    ESP_LOGW(TAG, "Nextion omitida en boot (WATERLY_NEXTION_ENABLED=0)");
+    nextion_init();  // no-op seguro
+    actualizar_carga(10, "System Init (sin Nextion)...");
+#endif
 
     // 4. INICIAR EL CEREBRO (APP CONTROLLER)
     actualizar_carga(30, "Init Controller...");
@@ -113,28 +127,21 @@ void app_main(void)
         
         ESP_LOGI(TAG, "Iniciando MQTT...");
         mqtt_app_start();
-        
-        // 6. SINCRONIZACIÓN
-        actualizar_carga(90, "Sync MQTT...");
-        ESP_LOGI(TAG, "Esperando 5s para recibir configuración MQTT...");
-        
-        // Durante este delay, llenamos la barra lentamente hasta el final
-        for(int i=90; i<=100; i++) {
-             char j_cmd[24];
-             snprintf(j_cmd, sizeof(j_cmd), "page0.j0.val=%d", i);
-             nextion_send_cmd(j_cmd);
-             vTaskDelay(pdMS_TO_TICKS(500)); // Repartimos los 5s aquí
-        }
+
+        // 6. Listo (MQTT conecta en background; sin delay artificial)
+        actualizar_carga(100, "Ready");
 
         // 7. DECISIÓN POR DEFECTO
         ESP_LOGW(TAG, "Enviando señal de arranque por defecto...");
-        
-        // ¡Listo! Al mandar GO_IDLE, el app_controller cambiará a la Page 1 (Menú)
+
+        // ¡Listo! Al mandar GO_IDLE, el app_controller queda en reposo
         app_controller_send_event(APP_EVENT_GO_IDLE);
 
     } else {
         actualizar_carga(0, "Error WiFi");
+#if WATERLY_NEXTION_ENABLED
         nextion_send_txt("page0.t0", "Fallo WiFi");
+#endif
         ESP_LOGE(TAG, "Fallo crítico WiFi");
     }
 

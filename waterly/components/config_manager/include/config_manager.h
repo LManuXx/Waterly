@@ -34,7 +34,7 @@
 
 #define DEFAULT_OTA_URL "http://waterly.local:8000/firmware/version.json"
 
-#define DEFAULT_TRAINING_INTERVAL_MS 3000
+#define DEFAULT_TRAINING_INTERVAL_MS 1000
 #define DEFAULT_DEEP_SLEEP_MIN       1
 
 // --- ESTRUCTURA DE CONFIGURACION ---

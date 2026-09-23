@@ -17,13 +17,12 @@
 static const char *TAG = "APP_CTRL";
 
 #define EVENT_QUEUE_SIZE        16
-#define TIEMPO_ENTRE_MUESTRAS   3000
+#define TIEMPO_ENTRE_MUESTRAS_DEFAULT 3000
 #define TIEMPO_DEEP_SLEEP_MIN   1
 #define I2C_MASTER_NUM          I2C_NUM_0
 
 #define SENSOR_POLL_DELAY_MS    10
 #define SENSOR_TIMEOUT_MS        1500
-#define LED_DRV_CURRENT         0
 
 #define OTA_JSON_URL_FALLBACK   "http://waterly.local:8000/firmware/version.json"
 #define CURRENT_FIRMWARE_VER    1
@@ -51,14 +50,60 @@ static QueueHandle_t event_queue = NULL;
 static app_state_t current_state = STATE_IDLE;
 static as7265x_handle_t sensor;
 static bool sensor_ok = false;
+static volatile bool s_is_measuring = false;
+static int s_training_interval_ms = TIEMPO_ENTRE_MUESTRAS_DEFAULT;
+static int s_led_current = DEFAULT_SENSOR_LED_CURRENT;
+static as7265x_gain_t s_sensor_gain = AS7265X_GAIN_64X;
+static uint8_t s_integration = DEFAULT_SENSOR_INTEGRATION;
+static bool s_bulbs_on = false;
+
+static void load_sensor_runtime_config(void) {
+    waterly_config_t cfg;
+    if (config_manager_get(&cfg) != ESP_OK) {
+        return;
+    }
+    int gain = cfg.sensor_gain;
+    if (gain < 0) gain = 0;
+    if (gain > 3) gain = 3;
+    s_sensor_gain = (as7265x_gain_t)gain;
+    s_integration = (cfg.sensor_integration > 0) ? (uint8_t)cfg.sensor_integration : DEFAULT_SENSOR_INTEGRATION;
+    int led = cfg.sensor_led_current;
+    if (led < 0) led = 0;
+    if (led > 3) led = 3;
+    s_led_current = led;
+    if (cfg.training_interval_ms > 0) {
+        /* Monitor continuo: acotar a 0.5–2 s para que el panel se vea “en vivo” */
+        int ms = cfg.training_interval_ms;
+        if (ms < 500) ms = 500;
+        if (ms > 2000) ms = 2000;
+        s_training_interval_ms = ms;
+    }
+    ESP_LOGI(TAG, "Sensor cfg: gain=%d integration=%u led=%d training_ms=%d",
+             (int)s_sensor_gain, (unsigned)s_integration, s_led_current, s_training_interval_ms);
+}
+
+/** Enciende/apaga las 3 bombillas (UV+VIS+NIR) casi a la vez; settle solo al encender. */
+static void set_bulbs(bool on) {
+    if (!sensor_ok) return;
+    if (s_bulbs_on == on) return;
+    as7265x_set_bulb_current(&sensor, (uint8_t)s_led_current, on);
+    if (on) {
+        /* Fuente estable antes de integrar (todas ya ON). */
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    s_bulbs_on = on;
+    ESP_LOGD(TAG, "Bulbs %s", on ? "ON" : "OFF");
+}
 
 static void iniciar_sensor_interno() {
     ESP_LOGI(TAG, "Buscando sensor AS7265x...");
     nextion_send_txt(NX_STATUS, "Buscando sensor");
+    load_sensor_runtime_config();
     
     if (as7265x_init(&sensor, I2C_MASTER_NUM) == ESP_OK) {
-        as7265x_set_integration_time(&sensor, 50);
-        as7265x_set_bulb_current(&sensor, 0, false);
+        as7265x_set_integration_time(&sensor, s_integration);
+        as7265x_set_bulb_current(&sensor, (uint8_t)s_led_current, false);
+        s_bulbs_on = false;
         sensor_ok = true;
         ESP_LOGI(TAG, "Sensor encontrado y configurado.");
         nextion_send_txt(NX_STATUS, "Sensor OK");
@@ -75,7 +120,7 @@ static void ejecutar_ota() {
     nextion_send_txt(NX_STATUS, "Actualizando...");
     
     if (sensor_ok) {
-        as7265x_set_bulb_current(&sensor, 0, false);
+        set_bulbs(false);
     }
     
     waterly_config_t cfg;
@@ -105,18 +150,17 @@ static void tomar_medida_y_enviar() {
         return;
     }
 
+    s_is_measuring = true;
     as7265x_values_t data;
-    
+
     ESP_LOGD(TAG, "Iniciando secuencia de medida...");
     nextion_send_txt(NX_STATUS, "Midiendo...");
-    
-    // Iniciar barra de progreso
     nextion_set_progress_bar(NX_BAR, 10);
-    
-    as7265x_set_bulb_current(&sensor, LED_DRV_CURRENT, true);
-    vTaskDelay(pdMS_TO_TICKS(50));
 
-    as7265x_set_config(&sensor, AS7265X_MEASUREMENT_MODE_6_CHAN_ONE_SHOT, AS7265X_GAIN_64X);
+    /* Por muestra: ON (UV+VIS+NIR) → settle → integrar → OFF */
+    set_bulbs(true);
+
+    as7265x_set_config(&sensor, AS7265X_MEASUREMENT_MODE_6_CHAN_ONE_SHOT, s_sensor_gain);
 
     bool data_ready = false;
     int intentos_max = SENSOR_TIMEOUT_MS / SENSOR_POLL_DELAY_MS;
@@ -133,40 +177,24 @@ static void tomar_medida_y_enviar() {
 
     if (data_ready) {
         if (as7265x_get_all_values(&sensor, &data) == ESP_OK) {
-            as7265x_set_bulb_current(&sensor, LED_DRV_CURRENT, false);
+            set_bulbs(false);
             ESP_LOGI(TAG, "DATA FULL SPECTRUM LEIDA");
-
             nextion_set_progress_bar(NX_BAR, 100);
-
-            if (current_state == STATE_SINGLE_MEASURE || current_state == STATE_IDLE) {
-                nextion_send_txt(NX_STATUS, "Datos listos");
-
-                char buffer[256];
-                snprintf(buffer, sizeof(buffer),
-                    "[UV] A:%.2f | B:%.2f | C:%.2f | D:%.2f | E:%.2f | F:%.2f\r"
-                    "[VIS] G:%.2f | H:%.2f | I:%.2f | J:%.2f | K:%.2f | L:%.2f\r"
-                    "[NIR] R:%.2f | S:%.2f | T:%.2f | U:%.2f | V:%.2f | W:%.2f",
-                    data.A, data.B, data.C, data.D, data.E, data.F,
-                    data.G, data.H, data.I, data.J, data.K, data.L,
-                    data.R, data.S, data.T, data.U, data.V, data.W);
-
-                nextion_send_txt(NX_VALUES, buffer);
-            }
-
+            nextion_send_txt(NX_STATUS, current_state == STATE_TRAINING ? "Monitor..." : "Datos listos");
             mqtt_app_send_full_spectrum(&data);
-
         } else {
-            as7265x_set_bulb_current(&sensor, LED_DRV_CURRENT, false);
+            set_bulbs(false);
             ESP_LOGE(TAG, "Error I2C al leer registros");
             nextion_send_txt(NX_STATUS, "Error I2C");
             nextion_set_progress_bar(NX_BAR, 0);
         }
     } else {
-        as7265x_set_bulb_current(&sensor, LED_DRV_CURRENT, false);
+        set_bulbs(false);
         ESP_LOGE(TAG, "Timeout: El sensor nunca terminó de medir");
         nextion_send_txt(NX_STATUS, "Timeout sensor");
         nextion_set_progress_bar(NX_BAR, 0);
     }
+    s_is_measuring = false;
 }
 
 static void ir_a_dormir() {
@@ -175,7 +203,7 @@ static void ir_a_dormir() {
     nextion_send_txt(NX_STATUS, "Durmiendo...");
     
     if (sensor_ok) {
-        as7265x_set_bulb_current(&sensor, 0, false);
+        set_bulbs(false);
     }
     
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -186,71 +214,99 @@ static void ir_a_dormir() {
     esp_deep_sleep(TIEMPO_DEEP_SLEEP_MIN * 60 * 1000000ULL);
 }
 
+/** TWDT solo en estados activos (medida/OTA/sleep). IDLE no debe estar en el watchdog. */
+static bool s_wdt_subscribed = false;
+
+static void app_ctrl_wdt_subscribe(void) {
+    if (!s_wdt_subscribed) {
+        esp_task_wdt_add(NULL);
+        s_wdt_subscribed = true;
+    }
+}
+
+static void app_ctrl_wdt_unsubscribe(void) {
+    if (s_wdt_subscribed) {
+        esp_task_wdt_delete(NULL);
+        s_wdt_subscribed = false;
+    }
+}
+
 static void app_controller_task(void *pvParameters) {
     app_event_t event;
-    esp_task_wdt_add(NULL);
-    
+
     iniciar_sensor_interno();
 
     // Actualizamos el estado inicial al arrancar
     nextion_send_txt(NX_STATUS, "Listo");
+    // Arranca en IDLE: sin TWDT
+    app_ctrl_wdt_unsubscribe();
 
     while (1) {
-        esp_task_wdt_reset();
-        
+        if (s_wdt_subscribed) {
+            esp_task_wdt_reset();
+        }
+
         // --- ESPERA INTELIGENTE ---
-        // En IDLE: esperamos indefinidamente (bloqueado, 0% CPU)
-        // En TRAINING: esperamos 3s; si llega un comando, reaccionamos al instante
-        // En otros estados: no esperamos (acción inmediata)
+        // En IDLE: bloqueo indefinido (0% CPU), sin TWDT
+        // En TRAINING: 3s entre medidas; TWDT activo
+        // En otros estados: acción inmediata; TWDT activo
         TickType_t wait_time;
         switch (current_state) {
             case STATE_IDLE:
-                wait_time = pdMS_TO_TICKS(5000);  // Máximo 5s para el watchdog
+                wait_time = portMAX_DELAY;
                 break;
             case STATE_TRAINING:
-                wait_time = pdMS_TO_TICKS(TIEMPO_ENTRE_MUESTRAS); // 3s entre medidas
+                wait_time = pdMS_TO_TICKS(s_training_interval_ms);
                 break;
             default:
-                wait_time = 0; // Sin espera para acciones inmediatas
+                wait_time = 0;
                 break;
         }
-        
+
         // --- RECEPCIÓN DE EVENTOS ---
-        // Si llega un evento DURANTE la espera, se procesa INMEDIATAMENTE
         if (xQueueReceive(event_queue, &event, wait_time) == pdTRUE) {
-            
+
             switch (event) {
                 case APP_EVENT_GO_IDLE:
                     ESP_LOGI(TAG, ">>> MODO: IDLE <<<");
+                    xQueueReset(event_queue);
                     current_state = STATE_IDLE;
+                    set_bulbs(false);
+                    app_ctrl_wdt_unsubscribe();
                     nextion_send_txt(NX_STATUS, "En reposo");
                     nextion_set_progress_bar(NX_BAR, 0);
                     break;
 
                 case APP_EVENT_START_TRAINING:
-                    ESP_LOGI(TAG, ">>> MODO: TRAINING <<<");
+                    ESP_LOGI(TAG, ">>> MODO: TRAINING (monitor continuo) <<<");
                     current_state = STATE_TRAINING;
+                    app_ctrl_wdt_subscribe();
                     nextion_send_txt(NX_STATUS, "Escaneando...");
+                    /* Primera muestra ya (ciclo ON→medir→OFF dentro de tomar_medida). */
+                    tomar_medida_y_enviar();
                     break;
-                    
+
                 case APP_EVENT_SINGLE_MEASURE:
                     ESP_LOGI(TAG, ">>> MODO: SINGLE MEASURE <<<");
                     current_state = STATE_SINGLE_MEASURE;
+                    app_ctrl_wdt_subscribe();
                     nextion_send_txt(NX_STATUS, "Lectura unica");
                     break;
 
                 case APP_EVENT_STOP_AND_SLEEP:
                     ESP_LOGI(TAG, ">>> MODO: SLEEPING <<<");
                     current_state = STATE_SLEEPING;
+                    app_ctrl_wdt_subscribe();
                     nextion_send_txt(NX_STATUS, "Apagando...");
                     break;
-                
+
                 case APP_EVENT_START_OTA:
                     ESP_LOGW(TAG, ">>> MODO: OTA UPDATE <<<");
                     current_state = STATE_UPDATING;
+                    app_ctrl_wdt_subscribe();
                     nextion_send_txt(NX_STATUS, "Buscando OTA");
                     break;
-                    
+
                 case APP_EVENT_CHECK_WIFI:
                     ESP_LOGI(TAG, ">>> COMPROBANDO WIFI <<<");
                     esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -268,36 +324,37 @@ static void app_controller_task(void *pvParameters) {
                     }
                     break;
             }
-            
-            // Después de procesar un evento, volvemos arriba SIN ejecutar la acción
-            // del estado anterior. Así un GO_IDLE frena inmediatamente.
+
             continue;
         }
 
         // --- ACCIONES DEL ESTADO (solo si NO hubo evento) ---
         switch (current_state) {
             case STATE_IDLE:
-                // No hacer nada, ya esperamos arriba
                 break;
 
             case STATE_SINGLE_MEASURE:
                 tomar_medida_y_enviar();
                 ESP_LOGI(TAG, "Medida única completada, volviendo a IDLE.");
-                current_state = STATE_IDLE; 
+                current_state = STATE_IDLE;
+                app_ctrl_wdt_unsubscribe();
                 nextion_send_txt(NX_STATUS, "En reposo");
                 break;
 
             case STATE_TRAINING:
-                // El timeout de 3s ya pasó, tomamos la medida
                 tomar_medida_y_enviar();
                 break;
 
             case STATE_SLEEPING:
-                ir_a_dormir(); 
+                ir_a_dormir();
                 break;
 
             case STATE_UPDATING:
-                ejecutar_ota(); 
+                ejecutar_ota();
+                // ejecutar_ota deja current_state = IDLE; quitar TWDT
+                if (current_state == STATE_IDLE) {
+                    app_ctrl_wdt_unsubscribe();
+                }
                 break;
         }
     }
@@ -311,8 +368,27 @@ esp_err_t app_controller_init(void) {
     return (res == pdPASS) ? ESP_OK : ESP_FAIL;
 }
 
+bool app_controller_is_measuring(void) {
+    return s_is_measuring;
+}
+
 bool app_controller_send_event(app_event_t event) {
     if (event_queue == NULL) return false;
+
+    // Si nos piden IDLE, vaciamos la cola antes para frenar de inmediato
+    if (event == APP_EVENT_GO_IDLE) {
+        xQueueReset(event_queue);
+    }
+
+    // Deduplicación: si nos piden una medida puntual pero ya estamos midiendo
+    // o el estado actual ya es SINGLE_MEASURE, evitamos encolar duplicados
+    if (event == APP_EVENT_SINGLE_MEASURE) {
+        if (s_is_measuring || current_state == STATE_SINGLE_MEASURE) {
+            ESP_LOGW(TAG, "Medida en curso o pendiente, comando duplicado descartado");
+            return true;
+        }
+    }
+
     if (xQueueSendToBack(event_queue, &event, pdMS_TO_TICKS(10)) == pdTRUE) {
         return true;
     }

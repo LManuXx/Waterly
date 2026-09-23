@@ -3,24 +3,45 @@
 Thumbs.db
 .vscode/
 .idea/
+*.swp
+*~
 
-# --- SERVIDOR (Waterly Server) ---
-# Ignoramos la caché de Python
+# --- PYTHON ---
 backend/__pycache__/
+**/__pycache__/
 backend/*.pyc
+*.py[cod]
+.venv/
+venv/
 
-# --- DOCKER & DATOS (Lo más importante) ---
-# NO subas los logs de Mosquitto
+# --- FRONTEND ---
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# --- MODELO / DATOS RUNTIME ---
+*.pkl
+backend/data/
+data/
+
+# --- DOCKER & DATOS ---
+mosquitto/log/
 mosquitto/log/*.log
-
-# NO subas la base de datos interna de Mosquitto (persistencia)
+mosquitto/data/
 mosquitto/data/*.db
-
-# Si en el futuro usas volúmenes locales para Influx/Grafana, ignóralos
 influxdb_data/
 grafana_data/
+*.log
+
+# --- FIRMWARE OTA STAGING (bins subidos en runtime) ---
+firmware/*.bin
+firmware/*.elf
+firmware/version.json
 
 # --- SEGURIDAD ---
-# Archivos de variables de entorno con contraseñas
 .env
 backend/.env
+.env.*
+!.env.example
+!backend/.env.example

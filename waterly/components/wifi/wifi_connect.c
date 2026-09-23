@@ -17,6 +17,10 @@ static EventGroupHandle_t s_wifi_event_group;
 
 static int s_retry_num = 0;
 
+/* Credenciales recibidas por BLE (para sync a config_manager en SUCCESS) */
+static char s_ble_ssid[33];
+static char s_ble_pass[65];
+
 /* Manejador de eventos WiFi e IP */
 static void event_handler(void* arg, esp_event_base_t event_base,
                           int32_t event_id, void* event_data)
@@ -79,6 +83,10 @@ static void provisioning_event_handler(void* arg, esp_event_base_t event_base,
             case WIFI_PROV_CRED_RECV: {
                 wifi_sta_config_t* wifi_sta_cfg = (wifi_sta_config_t*)event_data;
                 ESP_LOGI(TAG, "Credenciales recibidas - SSID: %s", (const char*)wifi_sta_cfg->ssid);
+                strncpy(s_ble_ssid, (const char*)wifi_sta_cfg->ssid, sizeof(s_ble_ssid) - 1);
+                s_ble_ssid[sizeof(s_ble_ssid) - 1] = '\0';
+                strncpy(s_ble_pass, (const char*)wifi_sta_cfg->password, sizeof(s_ble_pass) - 1);
+                s_ble_pass[sizeof(s_ble_pass) - 1] = '\0';
                 nextion_send_txt("page0.t2", "Creds OK");
                 break;
             }
@@ -90,7 +98,16 @@ static void provisioning_event_handler(void* arg, esp_event_base_t event_base,
                 break;
             }
             case WIFI_PROV_CRED_SUCCESS:
-                ESP_LOGI(TAG, "Provisioning exitoso - credenciales guardadas en NVS");
+                ESP_LOGI(TAG, "Provisioning exitoso - credenciales guardadas en NVS (wifi_prov)");
+                /* Unificar: copiar a config_manager para que ThingsBoard/NVS reflejen la red real */
+                if (strlen(s_ble_ssid) > 0) {
+                    esp_err_t sync = config_manager_set_wifi(s_ble_ssid, s_ble_pass);
+                    if (sync == ESP_OK) {
+                        ESP_LOGI(TAG, "SSID/pass sincronizados a config_manager ('%s')", s_ble_ssid);
+                    } else {
+                        ESP_LOGW(TAG, "No se pudo sync a config_manager: %s", esp_err_to_name(sync));
+                    }
+                }
                 nextion_send_txt("page0.t2", "Prov OK!");
                 break;
             case WIFI_PROV_END:
@@ -106,6 +123,8 @@ static void provisioning_event_handler(void* arg, esp_event_base_t event_base,
 esp_err_t wifi_connect_init(void)
 {
     s_wifi_event_group = xEventGroupCreate();
+    s_ble_ssid[0] = '\0';
+    s_ble_pass[0] = '\0';
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -127,48 +146,44 @@ esp_err_t wifi_connect_init(void)
 
     ESP_ERROR_CHECK(wifi_prov_mgr_init(config));
 
-    // 1. Verificar si hay credenciales de provisioning manager
     bool provisioned = false;
     ESP_ERROR_CHECK(wifi_prov_mgr_is_provisioned(&provisioned));
     ESP_LOGI(TAG, "wifi_prov_mgr_is_provisioned = %s", provisioned ? "SI" : "NO");
 
-    // 2. Verificar si hay credenciales en config_manager
     bool has_cfg_creds = config_manager_has_wifi_credentials();
     ESP_LOGI(TAG, "config_manager_has_wifi_credentials = %s", has_cfg_creds ? "SI" : "NO");
 
-    if (provisioned) {
-        // Credenciales del provisioning manager (BLE anterior)
-        ESP_LOGI(TAG, "Usando credenciales de provisioning manager");
-        nextion_send_txt("page0.t2", "Conectando...");
-        wifi_prov_mgr_deinit();
-        esp_wifi_set_mode(WIFI_MODE_STA);
-        esp_wifi_start();
-    }
-    else if (has_cfg_creds) {
-        // Credenciales de config_manager (OTA config via MQTT)
+    /*
+     * Orden de preferencia (UX):
+     * 1) config_manager (ThingsBoard / sync BLE) — fuente de verdad editable
+     * 2) wifi_prov NVS (provisioning BLE antiguo)
+     * 3) BLE provisioning de primer arranque
+     */
+    if (has_cfg_creds) {
         waterly_config_t nvs_cfg;
         config_manager_get(&nvs_cfg);
-        
+
         ESP_LOGI(TAG, "Usando credenciales de config_manager - SSID: '%s'", nvs_cfg.wifi_ssid);
         nextion_send_txt("page0.t2", "Conectando...");
-        
+
         wifi_prov_mgr_deinit();
-        
-        wifi_config_t wifi_cfg = {
-            .sta = {
-                .ssid = "",
-                .password = "",
-            },
-        };
+
+        wifi_config_t wifi_cfg = {0};
         strncpy((char*)wifi_cfg.sta.ssid, nvs_cfg.wifi_ssid, sizeof(wifi_cfg.sta.ssid) - 1);
         strncpy((char*)wifi_cfg.sta.password, nvs_cfg.wifi_pass, sizeof(wifi_cfg.sta.password) - 1);
-        
+
         esp_wifi_set_mode(WIFI_MODE_STA);
         esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
         esp_wifi_start();
     }
+    else if (provisioned) {
+        ESP_LOGI(TAG, "Usando credenciales de provisioning manager (legacy)");
+        nextion_send_txt("page0.t2", "Conectando...");
+        wifi_prov_mgr_deinit();
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_start();
+    }
     else {
-        // No hay credenciales - iniciar BLE provisioning
         char service_name[32];
         get_device_service_name(service_name, sizeof(service_name));
 
@@ -178,9 +193,14 @@ esp_err_t wifi_connect_init(void)
         wifi_prov_security_t security = WIFI_PROV_SECURITY_1;
         const char *pop = nvs_cfg.ble_pop;
 
-        ESP_LOGI(TAG, "Iniciando BLE provisioning - POP: '%s', Service: '%s'", pop, service_name);
+        ESP_LOGW(TAG, "=== PRIMER ARRANQUE / SIN WIFI ===");
+        ESP_LOGW(TAG, "Abre la app Espressif BLE Provisioning (o similar)");
+        ESP_LOGW(TAG, "Dispositivo BLE: %s", service_name);
+        ESP_LOGW(TAG, "Proof of Possession (POP): %s", pop);
+        ESP_LOGW(TAG, "==================================");
+
         wifi_prov_mgr_start_provisioning(security, pop, service_name, NULL);
-        
+
         nextion_send_txt("page0.t2", "Config BLE...");
     }
 

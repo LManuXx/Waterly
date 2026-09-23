@@ -1,0 +1,71 @@
+# === Raíz Waterly (repo git) ===
+# AGENTS.md es guía local para agentes: NO subir a GitHub.
+AGENTS.md
+
+# Este .gitignore evita artefactos locales/build/runtime.
+
+# OS / editores
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.code-workspace
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+**/.env.example
+
+# Modelos / datos runtime (volumen Docker)
+*.pkl
+**/data/waterly_model.pkl
+waterly_server/backend/data/
+
+# Node / frontend build
+**/node_modules/
+**/frontend/dist/
+**/.vite/
+*.tsbuildinfo
+
+# ESP-IDF (además de waterly/.gitignore)
+waterly/build/
+waterly/sdkconfig
+waterly/sdkconfig.old
+waterly/managed_components/
+waterly/dependencies.lock
+
+# Docker / persistencia local
+**/influxdb_data/
+**/grafana_data/
+waterly_server/mosquitto/log/
+waterly_server/mosquitto/data/
+*.log
+
+# Firmware subido en runtime (OTA staging)
+waterly_server/firmware/*.bin
+waterly_server/firmware/*.elf
+waterly_server/firmware/version.json
+
+# Tests / cobertura / caches
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.tmp
+/tmp/
+
+# Cursor / agente local (permite rules del repo)
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**

@@ -22,4 +22,7 @@ esp_err_t app_controller_init(void);
 // Retorna true si se pudo encolar
 bool app_controller_send_event(app_event_t event);
 
+// Consulta si el sensor se encuentra activamente realizando una medición
+bool app_controller_is_measuring(void);
+
 #endif

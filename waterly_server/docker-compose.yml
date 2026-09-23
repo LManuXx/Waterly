@@ -1,7 +1,6 @@
 version: '3.8'
 
 services:
-  # 1. EL CARTERO (Mosquitto)
   mosquitto:
     image: eclipse-mosquitto
     container_name: waterly_mqtt
@@ -14,7 +13,6 @@ services:
       - ./mosquitto/data:/mosquitto/data
       - ./mosquitto/log:/mosquitto/log
 
-  # 2. LA MEMORIA (InfluxDB)
   influxdb:
     image: influxdb:2.7
     container_name: waterly_db
@@ -31,7 +29,6 @@ services:
     volumes:
       - influxdb_data:/var/lib/influxdb2
 
-  # 3. EL CEREBRO (Python API)
   waterly_brain:
     build: ./backend
     container_name: waterly_api
@@ -40,20 +37,34 @@ services:
       - "8000:8000"
     environment:
       - MQTT_BROKER=mosquitto
+      - MOSQUITTO_HOST=mosquitto
+      - TB_ENABLED=${TB_ENABLED:-false}
       - TB_HOST=thingsboard
       - PYTHONUNBUFFERED=1
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=admin
+      - INFLUX_ORG=waterly_org
+      - INFLUX_BUCKET=sensor_data
     volumes:
       - waterly_model:/app/data/
       - ./firmware:/app/firmware
-
     depends_on:
-      mosquitto:
-        condition: service_started
-      thingsboard:
-        condition: service_healthy
+      - mosquitto
+      - influxdb
 
-  # 4. LA PLATAFORMA (ThingsBoard)
+  # Panel web propio (Vite/React → nginx). Puerto host 3000.
+  waterly_ui:
+    build: ./frontend
+    container_name: waterly_ui
+    restart: always
+    ports:
+      - "3000:80"
+    depends_on:
+      - waterly_brain
+
+  # Opt-in: COMPOSE_PROFILES=thingsboard TB_ENABLED=true docker compose up -d
   thingsboard:
+    profiles: ["thingsboard"]
     image: thingsboard/tb-postgres
     container_name: waterly_tb
     restart: always
@@ -65,17 +76,13 @@ services:
     volumes:
       - tb_data:/data
       - tb_log:/var/log/thingsboard
-
-    # DEFINIMOS QUÉ SIGNIFICA ESTAR "SANO":
     healthcheck:
-      # Intenta descargar la página de login. Si responde, está vivo.
       test: [ "CMD", "wget", "--spider", "-q", "http://localhost:9090/login" ]
-      interval: 10s # Prueba cada 10 segundos
-      timeout: 5s # Si tarda más de 5s, falla
-      retries: 20 # Inténtalo 20 veces antes de rendirte
-      start_period: 60s # Dale 1 minuto de gracia inicial para arrancar Java
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
 
-  # 5. EL ANUNCIADOR mDNS (Python/zeroconf - sin dependencias del host)
   mdns_publisher:
     build: ./mdns_publisher
     container_name: waterly_mdns

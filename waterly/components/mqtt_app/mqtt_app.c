@@ -22,7 +22,30 @@ esp_mqtt_client_handle_t client = NULL;
 #define MDNS_TIMEOUT_MS      3000   // Timeout por intento (3s)
 #define MDNS_RETRY_DELAY_MS  2000   // Pausa entre reintentos (2s)
 
-char mqtt_uri_buffer[64]; 
+char mqtt_uri_buffer[64];
+static char s_topic_cmd[65] = DEFAULT_MQTT_TOPIC_CMD;
+static char s_topic_dat[65] = DEFAULT_MQTT_TOPIC_DAT;
+static char s_topic_cfg[] = "waterly/config";
+static char s_client_id[33] = DEFAULT_MQTT_CLIENT_ID;
+
+static void load_mqtt_runtime_topics(void) {
+    waterly_config_t cfg;
+    if (config_manager_get(&cfg) != ESP_OK) {
+        return;
+    }
+    if (strlen(cfg.mqtt_topic_cmd) > 0) {
+        strncpy(s_topic_cmd, cfg.mqtt_topic_cmd, sizeof(s_topic_cmd) - 1);
+        s_topic_cmd[sizeof(s_topic_cmd) - 1] = '\0';
+    }
+    if (strlen(cfg.mqtt_topic_dat) > 0) {
+        strncpy(s_topic_dat, cfg.mqtt_topic_dat, sizeof(s_topic_dat) - 1);
+        s_topic_dat[sizeof(s_topic_dat) - 1] = '\0';
+    }
+    if (strlen(cfg.mqtt_client_id) > 0) {
+        strncpy(s_client_id, cfg.mqtt_client_id, sizeof(s_client_id) - 1);
+        s_client_id[sizeof(s_client_id) - 1] = '\0';
+    }
+} 
 
 static char* resolve_mdns_host(const char * host_name) {
     ESP_LOGI(TAG, "Iniciando mDNS para buscar: %s.local", host_name);
@@ -69,9 +92,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
-        ESP_LOGI(TAG, "MQTT Conectado! Suscribiendo...");
+        ESP_LOGI(TAG, "MQTT Conectado! Suscribiendo a %s", s_topic_cmd);
         nextion_send_txt("page0.t0", "MQTT OK");
-        esp_mqtt_client_subscribe(client, "waterly/comandos", 0);
+        esp_mqtt_client_subscribe(client, s_topic_cmd, 0);
         
         // Publicar configuracion actual al broker (retain=True para que el backend la reciba al reconectar)
         {
@@ -91,8 +114,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                 
                 char *json_str = cJSON_PrintUnformatted(config_json);
                 if (json_str) {
-                    esp_mqtt_client_publish(client, "waterly/config", json_str, 0, 1, true);
-                    ESP_LOGI(TAG, "Configuracion publicada a waterly/config");
+                    esp_mqtt_client_publish(client, s_topic_cfg, json_str, 0, 1, true);
+                    ESP_LOGI(TAG, "Configuracion publicada a %s", s_topic_cfg);
                     free(json_str);
                 }
                 cJSON_Delete(config_json);
@@ -114,11 +137,21 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
 
     case MQTT_EVENT_DATA:
-        ESP_LOGI(TAG, "Mensaje MQTT recibido");
+        ESP_LOGI(TAG, "Mensaje MQTT recibido en topic '%.*s' (%d bytes)",
+                 event->topic_len, event->topic, event->data_len);
         
-        cJSON *root = cJSON_Parse(event->data);
+        cJSON *root = cJSON_ParseWithLength(event->data, event->data_len);
+        if (!root) {
+            char *safe_buf = malloc(event->data_len + 1);
+            if (safe_buf) {
+                memcpy(safe_buf, event->data, event->data_len);
+                safe_buf[event->data_len] = '\0';
+                root = cJSON_Parse(safe_buf);
+                free(safe_buf);
+            }
+        }
+
         if (root) {
-            
             // 1. CONTROL DE MODOS
             cJSON *item_mode = cJSON_GetObjectItem(root, "mode");
             if (cJSON_IsString(item_mode)) {
@@ -128,7 +161,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     app_controller_send_event(APP_EVENT_GO_IDLE);
                 } 
                 else if (strcmp(mode, "single") == 0) {
-                    app_controller_send_event(APP_EVENT_SINGLE_MEASURE);
+                    if (app_controller_is_measuring()) {
+                        ESP_LOGW(TAG, "Comando 'single' ignorado: sensor actualmente ocupado");
+                    } else {
+                        app_controller_send_event(APP_EVENT_SINGLE_MEASURE);
+                    }
                 } 
                 else if (strcmp(mode, "training") == 0) {
                     app_controller_send_event(APP_EVENT_START_TRAINING);
@@ -243,6 +280,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                 cJSON *j_factory = cJSON_GetObjectItem(item_config, "factory_reset");
                 if (cJSON_IsBool(j_factory) && cJSON_IsTrue(j_factory)) {
                     ESP_LOGW(TAG, "FACTORY RESET solicitado via MQTT");
+                    cJSON_Delete(root);
                     config_manager_factory_reset();
                     return;
                 }
@@ -272,30 +310,41 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 }
 
 void mqtt_app_start(void) {
-    // 1. INTENTAR AUTODETECTAR SERVIDOR POR mDNS (5 intentos)
+    waterly_config_t cfg;
+    config_manager_get(&cfg);
+    load_mqtt_runtime_topics();
+
+    const char *mdns_host = (strlen(cfg.mqtt_hostname) > 0) ? cfg.mqtt_hostname : MDNS_TARGET_HOSTNAME;
+
+    // 1. INTENTAR AUTODETECTAR SERVIDOR POR mDNS
     nextion_send_txt("page0.t0", "Buscando srv...");
-    char *server_ip = resolve_mdns_host(MDNS_TARGET_HOSTNAME);
-    
+    char *server_ip = resolve_mdns_host(mdns_host);
+
     if (server_ip != NULL) {
-        // mDNS encontró el servidor automáticamente
         snprintf(mqtt_uri_buffer, sizeof(mqtt_uri_buffer), "mqtt://%s:%d", server_ip, MQTT_PORT);
+    } else if (strlen(cfg.mqtt_broker_ip) > 0) {
+        ESP_LOGW(TAG, "mDNS fallo. Usando mqtt_broker_ip de NVS: %s", cfg.mqtt_broker_ip);
+        nextion_send_txt("page0.t0", "IP NVS...");
+        snprintf(mqtt_uri_buffer, sizeof(mqtt_uri_buffer), "mqtt://%s:%d", cfg.mqtt_broker_ip, MQTT_PORT);
     } else {
-        // FALLBACK: IP fija de emergencia (último recurso)
-        ESP_LOGE(TAG, "Fallo autodescubrimiento. Usando IP fija de emergencia.");
-        nextion_send_txt("page0.t0", "IP fija...");
-        snprintf(mqtt_uri_buffer, sizeof(mqtt_uri_buffer), "mqtt://192.168.50.136:1883");
+        ESP_LOGE(TAG, "Sin mDNS ni mqtt_broker_ip en NVS. No se puede conectar MQTT.");
+        nextion_send_txt("page0.t0", "MQTT sin IP");
+        return;
     }
 
-    ESP_LOGI(TAG, "Conectando al Broker: %s", mqtt_uri_buffer);
+    ESP_LOGI(TAG, "Conectando al Broker: %s (cmd=%s dat=%s)", mqtt_uri_buffer, s_topic_cmd, s_topic_dat);
+
+    int keepalive = (cfg.mqtt_keepalive > 0) ? cfg.mqtt_keepalive : DEFAULT_MQTT_KEEPALIVE;
+    int reconnect_ms = (cfg.mqtt_reconnect_ms > 0) ? cfg.mqtt_reconnect_ms : DEFAULT_MQTT_RECONNECT_MS;
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = mqtt_uri_buffer,
-        .session.keepalive = 120,                 // Ping cada 120s (Mosquitto tiene timeout 1.5x = 180s)
-        .network.reconnect_timeout_ms = 5000,     // Reconectar cada 5s si se cae
-        .credentials.set_null_client_id = false,   // Usar client_id explícito
-        .credentials.client_id = "waterly_esp32",  // ID único para evitar conflictos
+        .session.keepalive = keepalive,
+        .network.reconnect_timeout_ms = reconnect_ms,
+        .credentials.set_null_client_id = false,
+        .credentials.client_id = s_client_id,
     };
-    
+
     client = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, client);
     esp_mqtt_client_start(client);
@@ -317,8 +366,8 @@ void mqtt_app_send_full_spectrum(as7265x_values_t *vals) {
         vals->R, vals->S, vals->T, vals->U, vals->V, vals->W);
 
     if (len > 0 && len < sizeof(payload)) {
-        esp_mqtt_client_publish(client, "waterly/datos", payload, 0, 1, 0);
-        ESP_LOGI(TAG, "Datos espectrales enviados (%d bytes)", len);
+        esp_mqtt_client_publish(client, s_topic_dat, payload, 0, 1, 0);
+        ESP_LOGI(TAG, "Datos espectrales enviados a %s (%d bytes)", s_topic_dat, len);
     } else {
         ESP_LOGE(TAG, "Payload demasiado largo o error en snprintf");
     }

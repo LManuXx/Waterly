@@ -177,5 +177,52 @@ class TestSpectralBrain(unittest.TestCase):
         self.assertIsNotNone(prediction)
         self.assertGreaterEqual(prediction, 0.0)
 
+    def test_ensemble_and_consensus(self):
+        np.random.seed(42)
+        base_sample = {wl: 50000.0 for wl in self.brain._get_wavelengths()}
+        self.brain.calibrate([base_sample])
+        self.brain.model_type = "PLSR"
+        for i in range(1, 11):
+            concentration = float(i)
+            snv_data = np.linspace(0, 1, 18) * concentration + np.random.normal(0, 0.05, 18)
+            self.brain.add_training_sample(snv_data, concentration)
+
+        self.assertTrue(self.brain.train_model())
+        self.assertIn("PLSR", self.brain.models)
+        self.assertIn("Ridge", self.brain.models)
+        self.assertIn("SVR", self.brain.models)
+        self.assertIn("RF", self.brain.models)
+        self.assertIn("ensemble", self.brain.metrics)
+        self.assertIn("rpd", self.brain.metrics)
+
+        test_snv = np.linspace(0, 1, 18) * 5.0
+        result = self.brain.predict_result(test_snv)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["pred_mg_l"], result["pred_consensus"])
+        self.assertIsInstance(result["pred_by_model"], dict)
+        self.assertIsNotNone(result["pred_by_model"]["PLSR"])
+        self.assertIsNotNone(result["pred_by_model"]["Ridge"])
+        self.assertIn(result["pred_agreement"], ("ok", "warn", "disagree", "single"))
+
+        # Consenso unitario: descarta outlier
+        c = SpectralBrain.consensus_predictions(
+            {"PLSR": 10.0, "Ridge": 10.5, "SVR": 50.0, "RF": None},
+            {"PLSR": 1.0, "Ridge": 1.0, "SVR": 1.0},
+        )
+        self.assertIn("SVR", c["discarded_models"])
+        self.assertAlmostEqual(c["pred_consensus"], 10.25, places=2)
+
+    def test_ensemble_min_models_by_n(self):
+        np.random.seed(0)
+        base_sample = {wl: 50000.0 for wl in self.brain._get_wavelengths()}
+        self.brain.calibrate([base_sample])
+        self.brain.model_type = "PLSR"
+        for i in range(1, 4):
+            snv_data = np.linspace(0, 1, 18) * float(i) + np.random.normal(0, 0.02, 18)
+            self.brain.add_training_sample(snv_data, float(i * 10))
+        self.assertTrue(self.brain.train_model())
+        self.assertEqual(set(self.brain.models.keys()), {"PLSR", "Ridge"})
+
+
 if __name__ == '__main__':
     unittest.main()

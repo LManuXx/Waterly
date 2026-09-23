@@ -1,11 +1,17 @@
 #!/bin/bash
-# start.sh - Script para arrancar los servicios de Waterly
+# start.sh - Arranca Waterly (API + Mosquitto + Influx + panel web). ThingsBoard NO por defecto.
 
-# Navegar al directorio donde se encuentra el docker-compose.yml
-cd "$(dirname "$0")/waterly_server" || { echo "Error: No se encontró el directorio waterly_server"; exit 1; }
+cd "$(dirname "$0")/waterly_server" || { echo "Error: No se encontró waterly_server"; exit 1; }
 
-echo "Iniciando los servicios de Docker (Backend, Mosquitto, ThingsBoard, PostgreSQL)..."
-docker compose up -d
+if docker compose version >/dev/null 2>&1; then
+    DC="docker compose"
+else
+    DC="docker-compose"
+fi
 
-echo "✅ Servicios desplegados correctamente."
-echo "Puedes ver los logs con: docker compose logs -f"
+echo "Iniciando servicios con $DC (Mosquitto, InfluxDB, API, panel web, mDNS)..."
+echo "Panel: http://localhost:3000  |  API: http://localhost:8000"
+echo "ThingsBoard (opt-in): COMPOSE_PROFILES=thingsboard TB_ENABLED=true $DC up -d"
+$DC up -d --build
+
+echo "Servicios desplegados. Logs: cd waterly_server && $DC logs -f"

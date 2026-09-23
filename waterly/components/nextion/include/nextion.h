@@ -3,6 +3,14 @@
 
 #include "esp_err.h"
 
+/*
+ * TEMPORAL: pantalla Nextion deshabilitada.
+ * Pon a 1 para reactivar init UART, envío de comandos y escucha de botones.
+ */
+#ifndef WATERLY_NEXTION_ENABLED
+#define WATERLY_NEXTION_ENABLED 0
+#endif
+
 // --- CONFIGURACIÓN DE PINES ---
 // Puedes cambiarlos aquí si decides usar otros
 #define NEXTION_TX_PIN      17  // Al cable AMARILLO (RX) de la pantalla

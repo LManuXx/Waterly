@@ -10,11 +10,17 @@
 #include "app_controller.h"
 
 static const char *TAG = "NEXTION";
+#if WATERLY_NEXTION_ENABLED
 static const int RX_BUF_SIZE = 1024;
+#endif
 
 // --- FUNCIONES DE ENVÍO (TX) ---
 
 void nextion_send_cmd(const char* cmd) {
+#if !WATERLY_NEXTION_ENABLED
+    (void)cmd;
+    return;  // TEMPORAL: Nextion deshabilitada — no enviar por UART
+#else
     if (cmd == NULL) return;
     
     // 1. Enviar el comando
@@ -23,26 +29,40 @@ void nextion_send_cmd(const char* cmd) {
     // 2. Enviar el terminador obligatorio (0xFF 0xFF 0xFF)
     const char terminator[] = {0xFF, 0xFF, 0xFF};
     uart_write_bytes(NEXTION_UART_NUM, terminator, 3);
+#endif
 }
 
 void nextion_send_txt(const char* obj_name, const char* text) {
-    char buffer[256];
+#if !WATERLY_NEXTION_ENABLED
+    (void)obj_name;
+    (void)text;
+    return;  // TEMPORAL: Nextion deshabilitada
+#else
+    char buffer[512];
     // Formato Nextion: objeto.txt="texto"
     snprintf(buffer, sizeof(buffer), "%s.txt=\"%s\"", obj_name, text);
     nextion_send_cmd(buffer);
+#endif
 }
 
 void nextion_set_progress_bar(const char* obj_name, int value) {
+#if !WATERLY_NEXTION_ENABLED
+    (void)obj_name;
+    (void)value;
+    return;  // TEMPORAL: Nextion deshabilitada
+#else
     char buffer[64];
     // Formato Nextion para valores numéricos: objeto.val=100
     if (value < 0) value = 0;
     if (value > 100) value = 100;
     snprintf(buffer, sizeof(buffer), "%s.val=%d", obj_name, value);
     nextion_send_cmd(buffer);
+#endif
 }
 
 // --- TAREA DE RECEPCIÓN (RX) ---
 // Escucha lo que pulsas en la pantalla
+#if WATERLY_NEXTION_ENABLED
 static void nextion_rx_task(void *arg) {
     uint8_t* data = (uint8_t*) malloc(RX_BUF_SIZE);
     
@@ -116,9 +136,15 @@ static void nextion_rx_task(void *arg) {
     free(data);
     vTaskDelete(NULL);
 }
+#endif /* WATERLY_NEXTION_ENABLED */
 
 // --- INICIALIZACIÓN ---
 esp_err_t nextion_init(void) {
+#if !WATERLY_NEXTION_ENABLED
+    // TEMPORAL: no instalar UART ni tarea RX (pantalla no conectada)
+    ESP_LOGW(TAG, "Nextion DESHABILITADA (WATERLY_NEXTION_ENABLED=0). Stub activo.");
+    return ESP_OK;
+#else
     const uart_config_t uart_config = {
         .baud_rate = NEXTION_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
@@ -129,8 +155,8 @@ esp_err_t nextion_init(void) {
     };
 
     // Instalamos driver UART
-    // RX Buffer: 2048 (bastante espacio), TX Buffer: 0 (bloqueante, más simple)
-    esp_err_t err = uart_driver_install(NEXTION_UART_NUM, RX_BUF_SIZE * 2, 0, 0, NULL, 0);
+    // RX Buffer: 2048, TX Buffer: 1024 (asíncrono no bloqueante)
+    esp_err_t err = uart_driver_install(NEXTION_UART_NUM, RX_BUF_SIZE * 2, 1024, 0, NULL, 0);
     if (err != ESP_OK) return err;
 
     ESP_ERROR_CHECK(uart_param_config(NEXTION_UART_NUM, &uart_config));
@@ -141,4 +167,5 @@ esp_err_t nextion_init(void) {
 
     ESP_LOGI(TAG, "Nextion Iniciada en UART2 (TX:%d RX:%d)", NEXTION_TX_PIN, NEXTION_RX_PIN);
     return ESP_OK;
+#endif
 }

@@ -1,5 +1,6 @@
 fastapi
-uvicorn
+uvicorn[standard]
+websockets
 paho-mqtt
 requests
 influxdb-client
